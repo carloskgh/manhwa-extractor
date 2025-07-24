@@ -20,6 +20,11 @@ import json
 import logging
 import sys
 from datetime import datetime
+import asyncio
+import aiohttp
+import aiofiles
+from concurrent.futures import ProcessPoolExecutor
+from functools import partial
 
 # Configuração do sistema de logging
 def setup_logging():
@@ -267,6 +272,234 @@ class InputValidator:
 
 # Inicializar validador
 input_validator = InputValidator()
+
+# Sistema de Operações Assíncronas
+class AsyncOperationsManager:
+    """Gerenciador de operações assíncronas para melhor performance"""
+    
+    def __init__(self):
+        self.session = None
+        self.semaphore = asyncio.Semaphore(MAX_WORKERS)  # Limite de conexões simultâneas
+        self.process_pool = ProcessPoolExecutor(max_workers=2)  # Para processamento pesado
+        logger.info("🚀 Gerenciador de operações assíncronas inicializado")
+    
+    async def get_session(self):
+        """Obtém ou cria sessão HTTP assíncrona"""
+        if self.session is None or self.session.closed:
+            timeout = aiohttp.ClientTimeout(total=REQUEST_TIMEOUT)
+            connector = aiohttp.TCPConnector(limit=MAX_WORKERS, limit_per_host=5)
+            self.session = aiohttp.ClientSession(
+                headers=SCRAPING_HEADERS,
+                timeout=timeout,
+                connector=connector
+            )
+        return self.session
+    
+    async def close_session(self):
+        """Fecha a sessão HTTP"""
+        if self.session and not self.session.closed:
+            await self.session.close()
+            logger.info("Sessão HTTP fechada")
+    
+    async def download_image_async(self, url: str) -> Optional[bytes]:
+        """Download assíncrono de imagem com rate limiting"""
+        try:
+            # Verificar rate limiting
+            can_request, wait_time = rate_limiter.can_request(url)
+            if not can_request:
+                logger.info(f"Rate limit ativo para {rate_limiter.get_domain(url)}, aguardando {wait_time:.1f}s")
+                await asyncio.sleep(wait_time)
+            
+            if not validar_url_cached(url):
+                return None
+            
+            async with self.semaphore:  # Limitar conexões simultâneas
+                session = await self.get_session()
+                
+                # HEAD request para verificar tamanho
+                try:
+                    rate_limiter.record_request(url)
+                    async with session.head(url) as response:
+                        content_length = response.headers.get('content-length')
+                        if content_length and int(content_length) > 10 * 1024 * 1024:
+                            logger.warning(f"Imagem muito grande ({content_length} bytes), ignorando download")
+                            return None
+                except Exception:
+                    pass  # Continuar com GET se HEAD falhar
+                
+                # GET request para baixar
+                await asyncio.sleep(rate_limiter.smart_delay(url, "image_download"))
+                rate_limiter.record_request(url)
+                
+                async with session.get(url) as response:
+                    response.raise_for_status()
+                    
+                    # Verificar content-type
+                    content_type = response.headers.get('content-type', '').lower()
+                    if not any(img_type in content_type for img_type in ['image/', 'jpeg', 'png', 'webp']):
+                        logger.warning(f"Content-type inesperado para imagem: {content_type}")
+                        return None
+                    
+                    # Download com limite de tamanho
+                    content = b""
+                    max_size = 10 * 1024 * 1024
+                    
+                    async for chunk in response.content.iter_chunked(8192):
+                        content += chunk
+                        if len(content) > max_size:
+                            logger.warning(f"Tamanho da imagem excedeu {max_size} bytes, truncando download")
+                            return None
+                    
+                    if len(content) < 100:
+                        return None
+                    
+                    logger.debug(f"Download assíncrono concluído: {url} ({len(content)} bytes)")
+                    return content
+                    
+        except asyncio.TimeoutError:
+            logger.error(f"Timeout no download de {url}")
+            return None
+        except aiohttp.ClientError as e:
+            logger.error(f"Erro de rede ao baixar imagem de {url}: {e}")
+            return None
+        except Exception as e:
+            logger.error(f"Erro inesperado ao baixar imagem de {url}: {e}", exc_info=True)
+            return None
+    
+    async def download_multiple_images(self, urls: List[str], progress_callback=None) -> List[Tuple[str, Optional[bytes]]]:
+        """Download assíncrono de múltiplas imagens"""
+        logger.info(f"Iniciando download assíncrono de {len(urls)} imagens")
+        
+        async def download_with_progress(i, url):
+            result = await self.download_image_async(url)
+            if progress_callback:
+                progress_callback(i + 1, len(urls))
+            return url, result
+        
+        # Executar downloads em paralelo
+        tasks = [download_with_progress(i, url) for i, url in enumerate(urls)]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        
+        # Filtrar resultados válidos
+        valid_results = []
+        for result in results:
+            if isinstance(result, Exception):
+                logger.error(f"Erro no download assíncrono: {result}")
+            else:
+                valid_results.append(result)
+        
+        logger.info(f"Download assíncrono concluído: {len(valid_results)}/{len(urls)} sucessos")
+        return valid_results
+    
+    async def process_image_async(self, img_data: bytes, nome_fonte: str) -> Tuple[List, Optional[str]]:
+        """Processamento assíncrono de imagem em processo separado"""
+        try:
+            logger.info(f"Processando imagem assíncrona: {nome_fonte} ({len(img_data)} bytes)")
+            
+            # Executar processamento pesado em processo separado
+            loop = asyncio.get_event_loop()
+            result = await loop.run_in_executor(
+                self.process_pool,
+                self._process_image_sync,
+                img_data,
+                nome_fonte
+            )
+            
+            return result
+        except Exception as e:
+            logger.error(f"Erro no processamento assíncrono de {nome_fonte}: {e}", exc_info=True)
+            return [], str(e)
+    
+    def _process_image_sync(self, img_data: bytes, nome_fonte: str) -> Tuple[List, Optional[str]]:
+        """Processamento síncrono de imagem (executado em processo separado)"""
+        try:
+            img_pil = carregar_e_redimensionar_imagem(img_data)
+            if img_pil is None:
+                logger.warning(f"Falha ao carregar imagem: {nome_fonte}")
+                return [], "Erro ao carregar imagem"
+                
+            img = cv2.cvtColor(np.array(img_pil), cv2.COLOR_RGB2BGR)
+            paineis = extrair_paineis_hibrido_otimizado(img, img_id=nome_fonte)
+            logger.info(f"Extraídos {len(paineis)} painéis de {nome_fonte}")
+            return paineis, None
+        except Exception as e:
+            logger.error(f"Erro no processamento síncrono de {nome_fonte}: {e}")
+            return [], str(e)
+    
+    def cleanup(self):
+        """Limpeza de recursos"""
+        if self.process_pool:
+            self.process_pool.shutdown(wait=True)
+            logger.info("Process pool encerrado")
+
+# Inicializar gerenciador assíncrono
+async_manager = AsyncOperationsManager()
+
+# Wrapper para executar operações assíncronas no Streamlit
+def run_async(coro):
+    """Executa corrotina assíncrona de forma compatível com Streamlit"""
+    try:
+        # Tentar usar loop existente
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            # Se já há um loop rodando, criar novo thread
+            import concurrent.futures
+            with concurrent.futures.ThreadPoolExecutor() as executor:
+                future = executor.submit(asyncio.run, coro)
+                return future.result()
+        else:
+            return loop.run_until_complete(coro)
+    except RuntimeError:
+        # Criar novo loop se necessário
+        return asyncio.run(coro)
+
+def process_chapter_async(capitulo_info: Dict, progress_container=None) -> List[Tuple[Image.Image, str]]:
+    """Versão assíncrona do processamento de capítulo"""
+    
+    async def _process_async():
+        urls_imagens = extrair_imagens_capitulo(capitulo_info["url"])
+        
+        if not urls_imagens:
+            return []
+        
+        paineis_capitulo = []
+        
+        # Callback de progresso thread-safe
+        def update_progress(current, total):
+            if progress_container:
+                progress_container.progress(current / total, 
+                                          f"Processando página {current}/{total}")
+        
+        # Download assíncrono de múltiplas imagens
+        download_results = await async_manager.download_multiple_images(
+            urls_imagens, 
+            progress_callback=update_progress
+        )
+        
+        # Processar imagens em paralelo
+        tasks = []
+        for i, (url, img_data) in enumerate(download_results):
+            if img_data:
+                task = async_manager.process_image_async(
+                    img_data, 
+                    f"cap_{capitulo_info['numero']}_pag_{i+1}"
+                )
+                tasks.append(task)
+        
+        if tasks:
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            
+            for result in results:
+                if isinstance(result, Exception):
+                    logger.error(f"Erro no processamento assíncrono: {result}")
+                else:
+                    paineis, erro = result
+                    if not erro:
+                        paineis_capitulo.extend(paineis)
+        
+        return paineis_capitulo
+    
+    return run_async(_process_async())
 
 # Função auxiliar para delays não-bloqueantes
 def smart_sleep(duration: float = None, context: str = "general", url: str = None, show_progress: bool = True):
@@ -787,30 +1020,20 @@ def extrair_imagens_capitulo(url_capitulo: str) -> List[str]:
     return imagens
 
 def processar_capitulo_completo(capitulo_info: Dict) -> List[Tuple[Image.Image, str]]:
-    """Processa um capítulo completo e extrai todos os painéis"""
-    urls_imagens = extrair_imagens_capitulo(capitulo_info["url"])
-    
-    if not urls_imagens:
-        return []
-    
-    paineis_capitulo = []
+    """Processa um capítulo completo e extrai todos os painéis (versão otimizada assíncrona)"""
     progress_container = st.empty()
     
-    for i, url_img in enumerate(urls_imagens):
-        progress_container.progress((i + 1) / len(urls_imagens), 
-                                  f"Processando página {i+1}/{len(urls_imagens)}")
-        
-        img_data = baixar_imagem_url_otimizada(url_img)
-        if img_data:
-            paineis, erro = processar_imagem_otimizada(img_data, f"cap_{capitulo_info['numero']}_pag_{i+1}")
-            if not erro:
-                paineis_capitulo.extend(paineis)
-        
-        # Smart delay baseado no contexto e rate limiting
-        smart_sleep(context="chapter_processing", url=url_img, show_progress=False)
-    
-    progress_container.empty()
-    return paineis_capitulo
+    try:
+        # Usar versão assíncrona para melhor performance
+        paineis_capitulo = process_chapter_async(capitulo_info, progress_container)
+        logger.info(f"Processamento assíncrono do capítulo {capitulo_info['numero']} concluído: {len(paineis_capitulo)} painéis")
+        return paineis_capitulo
+    except Exception as e:
+        logger.error(f"Erro no processamento assíncrono do capítulo {capitulo_info['numero']}: {e}")
+        st.error(f"Erro no processamento: {e}")
+        return []
+    finally:
+        progress_container.empty()
 
 def mostrar_paineis_grid_otimizado(paineis: List[Tuple], titulo: str, expandido: bool = True):
     with st.expander(f"{titulo} - {len(paineis)} painel(is)", expanded=expandido):
@@ -934,6 +1157,28 @@ if rate_limiter.requests:
 else:
     st.sidebar.info("🟢 Nenhuma requisição recente")
 
+# Monitoramento de operações assíncronas
+st.sidebar.markdown("### ⚡ Operações Assíncronas")
+if hasattr(async_manager, 'session') and async_manager.session:
+    if async_manager.session.closed:
+        status = "🔴 Sessão fechada"
+    else:
+        status = "🟢 Sessão ativa"
+    st.sidebar.metric("Status HTTP", status)
+    
+    # Mostrar estatísticas do semáforo
+    if hasattr(async_manager, 'semaphore'):
+        available = async_manager.semaphore._value
+        total = MAX_WORKERS
+        used = total - available
+        st.sidebar.metric(
+            "Conexões simultâneas", 
+            f"{used}/{total}",
+            help="Número de downloads em paralelo"
+        )
+else:
+    st.sidebar.info("💤 Sessão assíncrona inativa")
+
 # Debug info
 if st.sidebar.checkbox("🔍 Debug"):
     st.sidebar.write(f"Painéis únicos: {len(st.session_state.paineis_processados)}")
@@ -970,19 +1215,37 @@ with tab1:
                 progress_bar = st.progress(0)
                 paineis_novos = []
                 
-                for i in range(0, len(files_data), BATCH_SIZE):
-                    lote = files_data[i:i+BATCH_SIZE]
+                # Versão assíncrona para uploads múltiplos
+                async def process_uploads_async():
+                    tasks = []
+                    for nome, data in files_data:
+                        task = async_manager.process_image_async(data, nome)
+                        tasks.append((nome, task))
                     
-                    for idx, (nome, data) in enumerate(lote):
-                        progress_bar.progress((i + idx + 1) / len(files_data))
+                    for i, (nome, task) in enumerate(tasks):
+                        progress_bar.progress((i + 1) / len(tasks))
                         
-                        paineis, erro = processar_imagem_otimizada(data, nome)
-                        if not erro:
-                            paineis_novos.extend(paineis)
-                            mostrar_paineis_grid_otimizado(paineis, f"📄 {nome}")
+                        try:
+                            paineis, erro = await task
+                            if not erro:
+                                paineis_novos.extend(paineis)
+                                # Mostrar preview após processamento
+                                if paineis:
+                                    mostrar_paineis_grid_otimizado(paineis, f"📄 {nome}")
+                        except Exception as e:
+                            logger.error(f"Erro no processamento assíncrono de {nome}: {e}")
+                    
+                    return paineis_novos
                 
-                st.session_state.painel_coletor.extend(paineis_novos)
-                progress_bar.empty()
+                # Executar processamento assíncrono
+                try:
+                    paineis_novos = run_async(process_uploads_async())
+                    st.session_state.painel_coletor.extend(paineis_novos)
+                except Exception as e:
+                    logger.error(f"Erro no processamento assíncrono de uploads: {e}")
+                    st.error(f"Erro no processamento: {e}")
+                finally:
+                    progress_bar.empty()
                 
                 if paineis_novos:
                     st.success(f"✅ {len(paineis_novos)} painéis extraídos!")
