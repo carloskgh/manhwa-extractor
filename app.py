@@ -1264,10 +1264,12 @@ class IntelligentCache:
             )
         
         with col4:
+            # Converter gerador para lista para usar len()
+            cache_files_count = len(list(self.cache_dir.glob('*.cache')))
             st.metric(
                 "Uso de Disco",
                 f"{stats['disk_usage_mb']:.1f}MB",
-                delta=f"{len(self.cache_dir.glob('*.cache'))} arquivos"
+                delta=f"{cache_files_count} arquivos"
             )
         
         # Estatísticas por tipo
