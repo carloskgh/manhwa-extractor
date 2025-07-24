@@ -18,24 +18,6 @@ import time
 from urllib.parse import urljoin, urlparse
 import json
 
-def baixar_modelo_yolo(dropbox_url, destino="modelos/best.pt"):
-    if not os.path.exists(destino):
-        try:
-            st.warning("📦 Baixando modelo YOLO (best.pt)...")
-            # Corrigir o link para download direto
-            url_download = dropbox_url.replace("?dl=0", "?dl=1")
-            response = requests.get(url_download, stream=True)
-            response.raise_for_status()
-
-            os.makedirs(os.path.dirname(destino), exist_ok=True)
-            with open(destino, "wb") as f:
-                for chunk in response.iter_content(chunk_size=8192):
-                    if chunk:
-                        f.write(chunk)
-
-            st.success("✅ Modelo YOLO baixado com sucesso!")
-        except Exception as e:
-            st.error(f"❌ Erro ao baixar o modelo: {e}")
 # Configuração da página
 st.set_page_config(page_title="Extrator de Painéis de Manhwa", layout="wide")
 st.title("🖼️ Extrator de Painéis de Manhwa")
@@ -68,35 +50,45 @@ SCRAPING_HEADERS = {
     "Sec-Fetch-Site": "none"
 }
 
-# URL do modelo no Dropbox
-URL_MODELO_DROPBOX = "https://www.dropbox.com/scl/fi/a743aqjqzau3fxy4fss4a/best.pt?rlkey=a24lozm0cw8znku0h743ylx2z&dl=0"
+# Caminho onde o modelo será salvo
+MODELO_PATH = "modelos/best.pt"
 
-# Baixar automaticamente se necessário
-baixar_modelo_yolo(URL_MODELO_DROPBOX)
+# URL do modelo no Dropbox (alterado para download direto)
+URL_MODELO_DROPBOX = "https://www.dropbox.com/scl/fi/a743aqjqzau3fxy4fss4a/best.pt?rlkey=a24lozm0cw8znku0h743ylx2z&dl=1"
 
-# Carregar modelo normalmente
-model = carregar_modelo("best.pt")
+def baixar_modelo_yolo(dropbox_url, destino=MODELO_PATH):
+    if not os.path.exists(destino):
+        try:
+            print("📦 Baixando modelo YOLO (best.pt)...")
+            os.makedirs(os.path.dirname(destino), exist_ok=True)
+            response = requests.get(dropbox_url, stream=True)
+            response.raise_for_status()
+            with open(destino, "wb") as f:
+                for chunk in response.iter_content(chunk_size=8192):
+                    if chunk:
+                        f.write(chunk)
+            print("✅ Modelo baixado com sucesso!")
+        except Exception as e:
+            print(f"❌ Erro ao baixar modelo: {e}")
 
-# Carregamento do modelo otimizado
-@st.cache_resource
-def carregar_modelo("best.pt"):
+def carregar_modelo():
     try:
-        modelo = YOLO("best.pt")
-        modelo.overrides['verbose'] = False
-        modelo.overrides['device'] = 'cpu'
-        
-        dummy_test = np.zeros((64, 64, 3), dtype=np.uint8)
-        modelo(dummy_test, verbose=False)
+        modelo = YOLO(MODELO_PATH)
         return modelo
-    except FileNotFoundError:
-        st.error("❌ Arquivo 'best.pt' não encontrado. Usando apenas detecção por contorno.")
-        return None
     except Exception as e:
-        st.error(f"❌ Erro ao carregar modelo: {e}")
-        st.info("💡 Usando apenas detecção por contorno...")
+        print(f"❌ Erro ao carregar o modelo: {e}")
         return None
 
-model = carregar_modelo("best.pt")
+# Executar download e carregamento
+baixar_modelo_yolo(URL_MODELO_DROPBOX)
+model = carregar_modelo()
+
+# Teste simples (evite executar na nuvem, só para checagem)
+if model:
+    print("✅ Modelo YOLO carregado com sucesso!")
+else:
+    print("⚠️ Modelo não foi carregado.")
+
 
 # Inicialização do estado da sessão
 def init_session_state():
