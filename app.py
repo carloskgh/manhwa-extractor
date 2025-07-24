@@ -18,6 +18,24 @@ import time
 from urllib.parse import urljoin, urlparse
 import json
 
+def baixar_modelo_yolo(dropbox_url, destino="modelos/best.pt"):
+    if not os.path.exists(destino):
+        try:
+            st.warning("📦 Baixando modelo YOLO (best.pt)...")
+            # Corrigir o link para download direto
+            url_download = dropbox_url.replace("?dl=0", "?dl=1")
+            response = requests.get(url_download, stream=True)
+            response.raise_for_status()
+
+            os.makedirs(os.path.dirname(destino), exist_ok=True)
+            with open(destino, "wb") as f:
+                for chunk in response.iter_content(chunk_size=8192):
+                    if chunk:
+                        f.write(chunk)
+
+            st.success("✅ Modelo YOLO baixado com sucesso!")
+        except Exception as e:
+            st.error(f"❌ Erro ao baixar o modelo: {e}")
 # Configuração da página
 st.set_page_config(page_title="Extrator de Painéis de Manhwa", layout="wide")
 st.title("🖼️ Extrator de Painéis de Manhwa")
