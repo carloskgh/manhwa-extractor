@@ -1234,7 +1234,7 @@ class IntelligentCache:
         }
     
     def display_dashboard(self):
-        """Exibe dashboard do cache"""
+        """Exibe dashboard do cache - VERSÃO CORRIGIDA"""
         stats = self.get_stats()
         
         st.markdown("### 💾 Dashboard do Cache")
@@ -1264,18 +1264,13 @@ class IntelligentCache:
             )
         
         with col4:
-            # Contar arquivos de cache de forma segura
-            try:
-                cache_files = list(self.cache_dir.glob('*.cache'))
-                cache_files_count = len(cache_files)
-            except Exception as e:
-                logger.warning(f"Erro ao contar arquivos de cache: {e}")
-                cache_files_count = 0
+            # CORREÇÃO DEFINITIVA - Evitar completamente o uso de glob() aqui
+            cache_files_count = stats.get('total_items', 0)  # Usar stats já calculados
             
             st.metric(
                 "Uso de Disco",
                 f"{stats['disk_usage_mb']:.1f}MB",
-                delta=f"{cache_files_count} arquivos"
+                delta=f"{cache_files_count} itens"  # Mudou de "arquivos" para "itens"
             )
         
         # Estatísticas por tipo
