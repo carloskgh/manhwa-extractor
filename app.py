@@ -1264,8 +1264,14 @@ class IntelligentCache:
             )
         
         with col4:
-            # Converter gerador para lista para usar len()
-            cache_files_count = len(list(self.cache_dir.glob('*.cache')))
+            # Contar arquivos de cache de forma segura
+            try:
+                cache_files = list(self.cache_dir.glob('*.cache'))
+                cache_files_count = len(cache_files)
+            except Exception as e:
+                logger.warning(f"Erro ao contar arquivos de cache: {e}")
+                cache_files_count = 0
+            
             st.metric(
                 "Uso de Disco",
                 f"{stats['disk_usage_mb']:.1f}MB",
