@@ -302,11 +302,18 @@ class AsyncOperationsManager:
             logger.info("Sessão HTTP fechada")
     
     async def download_image_async(self, url: str) -> Optional[bytes]:
-        """Download assíncrono de imagem com rate limiting"""
+        """Download assíncrono de imagem com rate limiting e cache"""
         start_time = time.time()
         metrics_collector.active_downloads += 1
         
         try:
+            # Verificar cache primeiro
+            cached_image = intelligent_cache.get(url, 'image')
+            if cached_image:
+                logger.debug(f"Imagem obtida do cache: {url}")
+                metrics_collector.record_request(time.time() - start_time, True, "cache_hit")
+                return cached_image
+            
             # Verificar rate limiting
             can_request, wait_time = rate_limiter.can_request(url)
             if not can_request:
@@ -358,6 +365,10 @@ class AsyncOperationsManager:
                         return None
                     
                     logger.debug(f"Download assíncrono concluído: {url} ({len(content)} bytes)")
+                    
+                    # Armazenar no cache
+                    intelligent_cache.set(url, content, 'image')
+                    
                     metrics_collector.record_request(time.time() - start_time, True, "download_success")
                     return content
                     
@@ -402,11 +413,22 @@ class AsyncOperationsManager:
         return valid_results
     
     async def process_image_async(self, img_data: bytes, nome_fonte: str) -> Tuple[List, Optional[str]]:
-        """Processamento assíncrono de imagem em processo separado"""
+        """Processamento assíncrono de imagem em processo separado com cache"""
         start_time = time.time()
         metrics_collector.active_processing += 1
         
         try:
+            # Verificar cache primeiro
+            cache_key = f"{nome_fonte}_{hashlib.md5(img_data).hexdigest()}"
+            cached_result = intelligent_cache.get(cache_key, 'processed_image')
+            if cached_result:
+                logger.debug(f"Resultado de processamento obtido do cache: {nome_fonte}")
+                processing_time = time.time() - start_time
+                paineis, erro = cached_result
+                panels_count = len(paineis) if not erro else 0
+                metrics_collector.record_processing(processing_time, panels_count, nome_fonte)
+                return cached_result
+            
             logger.info(f"Processando imagem assíncrona: {nome_fonte} ({len(img_data)} bytes)")
             
             # Executar processamento pesado em processo separado
@@ -417,6 +439,9 @@ class AsyncOperationsManager:
                 img_data,
                 nome_fonte
             )
+            
+            # Armazenar resultado no cache
+            intelligent_cache.set(cache_key, result, 'processed_image')
             
             # Registrar métricas de processamento
             paineis, erro = result
@@ -560,31 +585,31 @@ class MetricsCollector:
         col1, col2, col3, col4 = st.columns(4)
         
         with col1:
-            st.metric(
+            theme_manager.create_animated_metric(
                 "Taxa de Sucesso", 
                 f"{self.get_success_rate():.1%}",
-                delta=f"{self.metrics.total_requests} reqs" if self.metrics.total_requests > 0 else None
+                f"{self.metrics.total_requests} reqs" if self.metrics.total_requests > 0 else None
             )
         
         with col2:
-            st.metric(
+            theme_manager.create_animated_metric(
                 "Painéis Extraídos", 
-                self.metrics.total_panels_extracted,
-                delta=f"{self.metrics.total_images_processed} imgs"
+                str(self.metrics.total_panels_extracted),
+                f"{self.metrics.total_images_processed} imgs"
             )
         
         with col3:
-            st.metric(
+            theme_manager.create_animated_metric(
                 "Cache Hit Rate", 
                 f"{self.get_cache_hit_rate():.1%}",
-                delta="Ótimo" if self.get_cache_hit_rate() > 0.8 else "Baixo"
+                "Ótimo" if self.get_cache_hit_rate() > 0.8 else "Baixo"
             )
         
         with col4:
-            st.metric(
+            theme_manager.create_animated_metric(
                 "Throughput", 
                 f"{self.get_throughput():.1f}/min",
-                delta=f"{self.get_uptime()/60:.1f}min uptime"
+                f"{self.get_uptime()/60:.1f}min uptime"
             )
         
         # Métricas de tempo
@@ -677,6 +702,372 @@ class MetricsCollector:
 
 # Inicializar coletor de métricas
 metrics_collector = MetricsCollector()
+
+# Sistema de Cache Inteligente
+from pathlib import Path
+import pickle
+import hashlib
+from typing import Any
+
+class IntelligentCache:
+    """Sistema de cache inteligente com persistência e invalidação automática"""
+    
+    def __init__(self, cache_dir: str = "cache", max_memory_mb: int = 200):
+        self.cache_dir = Path(cache_dir)
+        self.cache_dir.mkdir(exist_ok=True)
+        self.max_memory_bytes = max_memory_mb * 1024 * 1024
+        self.memory_cache = {}  # Cache em memória para itens pequenos
+        self.cache_index = {}   # Índice com metadados dos itens
+        self.hit_count = 0
+        self.miss_count = 0
+        
+        # Configurações de TTL por tipo
+        self.ttl_config = {
+            'image': 3600 * 24,      # Imagens: 24 horas
+            'webpage': 3600 * 6,     # Páginas web: 6 horas  
+            'chapter_list': 3600 * 12, # Lista de capítulos: 12 horas
+            'processed_image': 3600 * 24 * 7, # Imagens processadas: 7 dias
+            'default': 3600 * 2      # Padrão: 2 horas
+        }
+        
+        self._load_index()
+        self._cleanup_expired()
+        logger.info(f"💾 Cache inteligente inicializado - Diretório: {cache_dir}")
+    
+    def _get_cache_key(self, data: Any, cache_type: str = "default") -> str:
+        """Gera chave única para o cache"""
+        if isinstance(data, str):
+            data_str = data
+        elif isinstance(data, bytes):
+            data_str = hashlib.md5(data).hexdigest()
+        else:
+            data_str = str(data)
+        
+        key_data = f"{cache_type}_{data_str}"
+        return hashlib.sha256(key_data.encode()).hexdigest()[:16]
+    
+    def _get_file_path(self, key: str) -> Path:
+        """Obtém caminho do arquivo de cache"""
+        return self.cache_dir / f"{key}.cache"
+    
+    def _load_index(self):
+        """Carrega índice do cache"""
+        index_file = self.cache_dir / "cache_index.json"
+        try:
+            if index_file.exists():
+                with open(index_file, 'r') as f:
+                    self.cache_index = json.load(f)
+                logger.debug(f"Índice do cache carregado: {len(self.cache_index)} itens")
+        except Exception as e:
+            logger.warning(f"Erro ao carregar índice do cache: {e}")
+            self.cache_index = {}
+    
+    def _save_index(self):
+        """Salva índice do cache"""
+        index_file = self.cache_dir / "cache_index.json"
+        try:
+            with open(index_file, 'w') as f:
+                json.dump(self.cache_index, f, indent=2)
+        except Exception as e:
+            logger.warning(f"Erro ao salvar índice do cache: {e}")
+    
+    def _cleanup_expired(self):
+        """Remove itens expirados do cache"""
+        current_time = time.time()
+        expired_keys = []
+        
+        for key, metadata in self.cache_index.items():
+            if current_time > metadata.get('expires_at', 0):
+                expired_keys.append(key)
+        
+        for key in expired_keys:
+            self._remove_item(key)
+        
+        if expired_keys:
+            logger.info(f"Cache cleanup: {len(expired_keys)} itens expirados removidos")
+    
+    def _remove_item(self, key: str):
+        """Remove item do cache"""
+        # Remover da memória
+        self.memory_cache.pop(key, None)
+        
+        # Remover arquivo
+        file_path = self._get_file_path(key)
+        if file_path.exists():
+            try:
+                file_path.unlink()
+            except Exception as e:
+                logger.warning(f"Erro ao remover arquivo de cache {key}: {e}")
+        
+        # Remover do índice
+        self.cache_index.pop(key, None)
+    
+    def _get_memory_usage(self) -> int:
+        """Calcula uso atual de memória do cache"""
+        total_size = 0
+        for key, data in self.memory_cache.items():
+            try:
+                total_size += len(pickle.dumps(data))
+            except:
+                pass
+        return total_size
+    
+    def _enforce_memory_limit(self):
+        """Aplica limite de memória removendo itens menos usados"""
+        if self._get_memory_usage() <= self.max_memory_bytes:
+            return
+        
+        # Ordenar por último acesso e remover os mais antigos
+        sorted_items = sorted(
+            self.cache_index.items(),
+            key=lambda x: x[1].get('last_access', 0)
+        )
+        
+        for key, _ in sorted_items:
+            if key in self.memory_cache:
+                del self.memory_cache[key]
+                logger.debug(f"Item removido da memória por limite: {key}")
+                
+                if self._get_memory_usage() <= self.max_memory_bytes * 0.8:
+                    break
+    
+    def get(self, data: Any, cache_type: str = "default") -> Any:
+        """Recupera item do cache"""
+        key = self._get_cache_key(data, cache_type)
+        current_time = time.time()
+        
+        # Verificar se existe e não expirou
+        if key not in self.cache_index:
+            self.miss_count += 1
+            metrics_collector.record_cache_event(False)
+            return None
+        
+        metadata = self.cache_index[key]
+        if current_time > metadata.get('expires_at', 0):
+            self._remove_item(key)
+            self.miss_count += 1
+            metrics_collector.record_cache_event(False)
+            return None
+        
+        # Tentar recuperar da memória primeiro
+        if key in self.memory_cache:
+            self.hit_count += 1
+            metadata['last_access'] = current_time
+            metadata['hit_count'] = metadata.get('hit_count', 0) + 1
+            metrics_collector.record_cache_event(True)
+            logger.debug(f"Cache hit (memória): {cache_type}")
+            return self.memory_cache[key]
+        
+        # Recuperar do disco
+        file_path = self._get_file_path(key)
+        if not file_path.exists():
+            self._remove_item(key)
+            self.miss_count += 1
+            metrics_collector.record_cache_event(False)
+            return None
+        
+        try:
+            with open(file_path, 'rb') as f:
+                data = pickle.load(f)
+            
+            # Colocar na memória se couber
+            if self._get_memory_usage() < self.max_memory_bytes:
+                self.memory_cache[key] = data
+                self._enforce_memory_limit()
+            
+            self.hit_count += 1
+            metadata['last_access'] = current_time
+            metadata['hit_count'] = metadata.get('hit_count', 0) + 1
+            metrics_collector.record_cache_event(True)
+            logger.debug(f"Cache hit (disco): {cache_type}")
+            return data
+            
+        except Exception as e:
+            logger.warning(f"Erro ao ler cache {key}: {e}")
+            self._remove_item(key)
+            self.miss_count += 1
+            metrics_collector.record_cache_event(False)
+            return None
+    
+    def set(self, data: Any, value: Any, cache_type: str = "default") -> bool:
+        """Armazena item no cache"""
+        key = self._get_cache_key(data, cache_type)
+        current_time = time.time()
+        ttl = self.ttl_config.get(cache_type, self.ttl_config['default'])
+        
+        try:
+            # Metadados do item
+            metadata = {
+                'created_at': current_time,
+                'last_access': current_time,
+                'expires_at': current_time + ttl,
+                'cache_type': cache_type,
+                'hit_count': 0,
+                'size_bytes': len(pickle.dumps(value))
+            }
+            
+            # Salvar no disco
+            file_path = self._get_file_path(key)
+            with open(file_path, 'wb') as f:
+                pickle.dump(value, f)
+            
+            # Colocar na memória se couber
+            if metadata['size_bytes'] < self.max_memory_bytes // 10:  # Máximo 10% da memória por item
+                self.memory_cache[key] = value
+                self._enforce_memory_limit()
+            
+            # Atualizar índice
+            self.cache_index[key] = metadata
+            self._save_index()
+            
+            logger.debug(f"Item adicionado ao cache: {cache_type} (TTL: {ttl}s)")
+            return True
+            
+        except Exception as e:
+            logger.warning(f"Erro ao salvar no cache: {e}")
+            return False
+    
+    def invalidate_type(self, cache_type: str):
+        """Invalida todos os itens de um tipo específico"""
+        keys_to_remove = [
+            key for key, metadata in self.cache_index.items()
+            if metadata.get('cache_type') == cache_type
+        ]
+        
+        for key in keys_to_remove:
+            self._remove_item(key)
+        
+        if keys_to_remove:
+            self._save_index()
+            logger.info(f"Cache invalidado: {len(keys_to_remove)} itens do tipo '{cache_type}'")
+    
+    def clear_all(self):
+        """Limpa todo o cache"""
+        # Limpar memória
+        self.memory_cache.clear()
+        
+        # Remover arquivos
+        for cache_file in self.cache_dir.glob("*.cache"):
+            try:
+                cache_file.unlink()
+            except Exception as e:
+                logger.warning(f"Erro ao remover {cache_file}: {e}")
+        
+        # Limpar índice
+        self.cache_index.clear()
+        self._save_index()
+        
+        logger.info("Cache completamente limpo")
+    
+    def get_stats(self) -> Dict:
+        """Retorna estatísticas do cache"""
+        total_requests = self.hit_count + self.miss_count
+        hit_rate = (self.hit_count / total_requests) if total_requests > 0 else 0
+        
+        # Calcular tamanhos
+        memory_usage = self._get_memory_usage()
+        disk_usage = sum(
+            metadata.get('size_bytes', 0) 
+            for metadata in self.cache_index.values()
+        )
+        
+        # Estatísticas por tipo
+        type_stats = {}
+        for metadata in self.cache_index.values():
+            cache_type = metadata.get('cache_type', 'unknown')
+            if cache_type not in type_stats:
+                type_stats[cache_type] = {'count': 0, 'size': 0}
+            type_stats[cache_type]['count'] += 1
+            type_stats[cache_type]['size'] += metadata.get('size_bytes', 0)
+        
+        return {
+            'hit_rate': hit_rate,
+            'hit_count': self.hit_count,
+            'miss_count': self.miss_count,
+            'total_items': len(self.cache_index),
+            'memory_items': len(self.memory_cache),
+            'memory_usage_mb': memory_usage / 1024 / 1024,
+            'disk_usage_mb': disk_usage / 1024 / 1024,
+            'max_memory_mb': self.max_memory_bytes / 1024 / 1024,
+            'type_stats': type_stats
+        }
+    
+    def display_dashboard(self):
+        """Exibe dashboard do cache"""
+        stats = self.get_stats()
+        
+        st.markdown("### 💾 Dashboard do Cache")
+        
+        # Métricas principais
+        col1, col2, col3, col4 = st.columns(4)
+        
+        with col1:
+            st.metric(
+                "Hit Rate",
+                f"{stats['hit_rate']:.1%}",
+                delta="Excelente" if stats['hit_rate'] > 0.8 else "Baixo"
+            )
+        
+        with col2:
+            st.metric(
+                "Total de Itens",
+                stats['total_items'],
+                delta=f"{stats['memory_items']} em memória"
+            )
+        
+        with col3:
+            st.metric(
+                "Uso de Memória",
+                f"{stats['memory_usage_mb']:.1f}MB",
+                delta=f"/{stats['max_memory_mb']:.0f}MB"
+            )
+        
+        with col4:
+            st.metric(
+                "Uso de Disco",
+                f"{stats['disk_usage_mb']:.1f}MB",
+                delta=f"{len(self.cache_dir.glob('*.cache'))} arquivos"
+            )
+        
+        # Estatísticas por tipo
+        if stats['type_stats']:
+            st.markdown("#### 📊 Cache por Tipo")
+            for cache_type, type_data in stats['type_stats'].items():
+                col1, col2 = st.columns(2)
+                with col1:
+                    st.metric(
+                        f"📁 {cache_type.title()}",
+                        type_data['count'],
+                        help=f"Número de itens do tipo {cache_type}"
+                    )
+                with col2:
+                    st.metric(
+                        "Tamanho",
+                        f"{type_data['size'] / 1024 / 1024:.1f}MB",
+                        help=f"Espaço usado pelo tipo {cache_type}"
+                    )
+        
+        # Botões de controle
+        col1, col2, col3 = st.columns(3)
+        
+        with col1:
+            if st.button("🧹 Limpar Cache Expirado"):
+                self._cleanup_expired()
+                st.success("Cache expirado removido!")
+                st.rerun()
+        
+        with col2:
+            if st.button("🗑️ Limpar Tudo", type="secondary"):
+                self.clear_all()
+                st.success("Cache completamente limpo!")
+                st.rerun()
+        
+        with col3:
+            if st.button("📊 Atualizar Stats"):
+                st.rerun()
+
+# Inicializar cache inteligente
+intelligent_cache = IntelligentCache()
 
 # Wrapper para executar operações assíncronas no Streamlit
 def run_async(coro):
@@ -774,7 +1165,498 @@ def smart_sleep(duration: float = None, context: str = "general", url: str = Non
         time.sleep(duration)
 
 # Configuração da página
-st.set_page_config(page_title="Extrator de Painéis de Manhwa", layout="wide")
+st.set_page_config(
+    page_title="🖼️ Extrator de Painéis de Manhwa",
+    page_icon="🖼️",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
+
+# Sistema de Temas e Interface Otimizada
+class ThemeManager:
+    """Gerenciador de temas e interface otimizada"""
+    
+    def __init__(self):
+        self.themes = {
+            'dark': {
+                'name': '🌙 Tema Escuro',
+                'primary_color': '#FF4B4B',
+                'background_color': '#0E1117',
+                'secondary_background': '#262730',
+                'text_color': '#FAFAFA',
+                'accent_color': '#FF6B6B'
+            },
+            'light': {
+                'name': '☀️ Tema Claro', 
+                'primary_color': '#FF4B4B',
+                'background_color': '#FFFFFF',
+                'secondary_background': '#F0F2F6',
+                'text_color': '#262730',
+                'accent_color': '#FF6B6B'
+            },
+            'cyberpunk': {
+                'name': '🎮 Cyberpunk',
+                'primary_color': '#00FF41',
+                'background_color': '#000000',
+                'secondary_background': '#1A1A1A',
+                'text_color': '#00FF41',
+                'accent_color': '#FF0080'
+            },
+            'ocean': {
+                'name': '🌊 Oceano',
+                'primary_color': '#4FC3F7',
+                'background_color': '#0D47A1',
+                'secondary_background': '#1565C0',
+                'text_color': '#E3F2FD',
+                'accent_color': '#81C784'
+            }
+        }
+        self.current_theme = self._load_theme_preference()
+        logger.info(f"🎨 Gerenciador de temas inicializado - Tema: {self.current_theme}")
+    
+    def _load_theme_preference(self) -> str:
+        """Carrega preferência de tema do usuário"""
+        try:
+            if 'user_theme' not in st.session_state:
+                st.session_state.user_theme = 'dark'
+            return st.session_state.user_theme
+        except:
+            return 'dark'
+    
+    def _save_theme_preference(self, theme: str):
+        """Salva preferência de tema"""
+        st.session_state.user_theme = theme
+        self.current_theme = theme
+    
+    def apply_custom_css(self):
+        """Aplica CSS customizado baseado no tema"""
+        theme = self.themes[self.current_theme]
+        
+        css = f"""
+        <style>
+        /* Animações e transições */
+        .element-container {{
+            transition: all 0.3s ease-in-out;
+        }}
+        
+        .stButton > button {{
+            transition: all 0.2s ease-in-out;
+            border-radius: 10px;
+            border: 2px solid {theme['primary_color']};
+            background: linear-gradient(45deg, {theme['primary_color']}, {theme['accent_color']});
+            box-shadow: 0 4px 15px rgba(255, 75, 75, 0.3);
+        }}
+        
+        .stButton > button:hover {{
+            transform: translateY(-2px);
+            box-shadow: 0 8px 25px rgba(255, 75, 75, 0.4);
+            scale: 1.05;
+        }}
+        
+        .stButton > button:active {{
+            transform: translateY(0px);
+            scale: 0.98;
+        }}
+        
+        /* Métricas animadas */
+        .metric-card {{
+            background: linear-gradient(135deg, {theme['secondary_background']}, {theme['background_color']});
+            padding: 1rem;
+            border-radius: 15px;
+            border: 1px solid {theme['primary_color']}40;
+            box-shadow: 0 4px 20px rgba(0,0,0,0.1);
+            transition: all 0.3s ease;
+        }}
+        
+        .metric-card:hover {{
+            transform: translateY(-5px);
+            box-shadow: 0 8px 30px rgba(0,0,0,0.15);
+            border-color: {theme['primary_color']};
+        }}
+        
+        /* Progress bars animadas */
+        .stProgress > div > div > div {{
+            background: linear-gradient(45deg, {theme['primary_color']}, {theme['accent_color']});
+            border-radius: 10px;
+            animation: pulse 2s infinite;
+        }}
+        
+        @keyframes pulse {{
+            0% {{ opacity: 0.8; }}
+            50% {{ opacity: 1; }}
+            100% {{ opacity: 0.8; }}
+        }}
+        
+        /* Alertas estilizados */
+        .stAlert {{
+            border-radius: 12px;
+            border-left: 5px solid {theme['primary_color']};
+            animation: slideIn 0.5s ease-out;
+        }}
+        
+        @keyframes slideIn {{
+            from {{ transform: translateX(-100%); opacity: 0; }}
+            to {{ transform: translateX(0); opacity: 1; }}
+        }}
+        
+        /* Badges de status */
+        .status-badge {{
+            display: inline-block;
+            padding: 0.3rem 0.8rem;
+            border-radius: 20px;
+            font-size: 0.8rem;
+            font-weight: bold;
+            animation: glow 2s ease-in-out infinite alternate;
+        }}
+        
+        .status-online {{
+            background: linear-gradient(45deg, #4CAF50, #8BC34A);
+            color: white;
+            box-shadow: 0 0 10px #4CAF5050;
+        }}
+        
+        .status-warning {{
+            background: linear-gradient(45deg, #FF9800, #FFC107);
+            color: white;
+            box-shadow: 0 0 10px #FF980050;
+        }}
+        
+        .status-error {{
+            background: linear-gradient(45deg, #F44336, #E91E63);
+            color: white;
+            box-shadow: 0 0 10px #F4433650;
+        }}
+        
+        @keyframes glow {{
+            from {{ box-shadow: 0 0 5px currentColor; }}
+            to {{ box-shadow: 0 0 20px currentColor, 0 0 30px currentColor; }}
+        }}
+        
+        /* Loading spinner customizado */
+        .loading-spinner {{
+            display: inline-block;
+            width: 20px;
+            height: 20px;
+            border: 3px solid {theme['primary_color']}30;
+            border-radius: 50%;
+            border-top-color: {theme['primary_color']};
+            animation: spin 1s ease-in-out infinite;
+        }}
+        
+        @keyframes spin {{
+            to {{ transform: rotate(360deg); }}
+        }}
+        
+        /* Cards de informação */
+        .info-card {{
+            background: linear-gradient(135deg, {theme['secondary_background']}, {theme['background_color']});
+            padding: 1.5rem;
+            border-radius: 15px;
+            border: 1px solid {theme['primary_color']}40;
+            margin: 1rem 0;
+            box-shadow: 0 6px 25px rgba(0,0,0,0.1);
+            transition: all 0.3s ease;
+        }}
+        
+        .info-card:hover {{
+            transform: translateY(-3px);
+            box-shadow: 0 10px 35px rgba(0,0,0,0.15);
+            border-color: {theme['primary_color']};
+        }}
+        </style>
+        """
+        
+        st.markdown(css, unsafe_allow_html=True)
+    
+    def render_theme_selector(self):
+        """Renderiza seletor de tema na sidebar"""
+        st.sidebar.markdown("### 🎨 Personalização")
+        
+        theme_names = [self.themes[key]['name'] for key in self.themes.keys()]
+        theme_keys = list(self.themes.keys())
+        
+        current_index = theme_keys.index(self.current_theme)
+        
+        selected_theme = st.sidebar.selectbox(
+            "Escolha o tema:",
+            options=theme_names,
+            index=current_index,
+            help="Selecione um tema para personalizar a interface"
+        )
+        
+        # Encontrar a chave do tema selecionado
+        selected_key = None
+        for key, theme in self.themes.items():
+            if theme['name'] == selected_theme:
+                selected_key = key
+                break
+        
+        if selected_key and selected_key != self.current_theme:
+            self._save_theme_preference(selected_key)
+            st.sidebar.success(f"Tema alterado para {selected_theme}!")
+            st.rerun()
+    
+    def create_animated_metric(self, label: str, value: str, delta: str = None):
+        """Cria métrica animada customizada"""
+        delta_color = "normal"
+        if delta:
+            if "Excelente" in delta or "Ótimo" in delta or "Rápido" in delta:
+                delta_color = "normal" 
+            elif "Baixo" in delta or "Lento" in delta:
+                delta_color = "inverse"
+        
+        st.markdown(f'''
+        <div class="metric-card">
+            <div style="font-size: 0.8rem; color: gray;">{label}</div>
+            <div style="font-size: 1.5rem; font-weight: bold; margin: 0.5rem 0;">{value}</div>
+            {f'<div style="font-size: 0.8rem; color: {"#00FF00" if delta_color == "normal" else "#FF6B6B"};">{delta}</div>' if delta else ''}
+        </div>
+        ''', unsafe_allow_html=True)
+    
+    def create_status_badge(self, text: str, status: str = "online"):
+        """Cria badge de status animado"""
+        return f'<span class="status-badge status-{status}">{text}</span>'
+    
+    def create_loading_spinner(self, text: str = "Carregando..."):
+        """Cria spinner de loading customizado"""
+        return f'''
+        <div style="display: flex; align-items: center; gap: 10px;">
+            <div class="loading-spinner"></div>
+            <span>{text}</span>
+        </div>
+        '''
+
+# Sistema de Configuração Externa
+class ConfigManager:
+    """Gerenciador de configurações externas"""
+    
+    def __init__(self, config_file: str = "config.json"):
+        self.config_file = config_file
+        self.default_config = {
+            "app": {
+                "name": "Extrator de Painéis de Manhwa",
+                "version": "2.0.0",
+                "debug": False,
+                "max_upload_size_mb": 50,
+                "supported_formats": ["jpg", "jpeg", "png", "webp"]
+            },
+            "yolo": {
+                "model_name": "yolov8n.pt",
+                "confidence_threshold": 0.25,
+                "device": "cpu",
+                "max_det": 300
+            },
+            "opencv": {
+                "max_width": 1024,
+                "min_contour_size": 100,
+                "blur_threshold": 100,
+                "area_threshold": 1000
+            },
+            "scraping": {
+                "request_timeout": 15,
+                "max_retries": 3,
+                "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                "max_workers": 4
+            },
+            "rate_limits": {
+                "manhwatop.com": {"requests": 5, "window": 60},
+                "reaperscans.com": {"requests": 3, "window": 60},
+                "asurascans.com": {"requests": 4, "window": 60},
+                "mangadex.org": {"requests": 8, "window": 60},
+                "default": {"requests": 10, "window": 60}
+            },
+            "cache": {
+                "max_memory_mb": 200,
+                "ttl": {
+                    "image": 86400,
+                    "webpage": 21600,
+                    "chapter_list": 43200,
+                    "processed_image": 604800,
+                    "default": 7200
+                }
+            },
+            "logging": {
+                "level": "INFO",
+                "file_rotation": True,
+                "max_file_size_mb": 10,
+                "backup_count": 5
+            },
+            "ui": {
+                "theme": "dark",
+                "sidebar_state": "expanded",
+                "show_debug": False,
+                "auto_refresh_metrics": True,
+                "metrics_refresh_interval": 10
+            },
+            "alerts": {
+                "success_rate_threshold": 80,
+                "memory_threshold_gb": 1.0,
+                "response_time_threshold_ms": 5000,
+                "enable_notifications": True
+            }
+        }
+        self.config = self._load_config()
+        self._apply_env_overrides()
+        logger.info(f"⚙️ Configuração carregada - Arquivo: {config_file}")
+    
+    def _load_config(self) -> dict:
+        """Carrega configuração do arquivo ou cria padrão"""
+        try:
+            if os.path.exists(self.config_file):
+                with open(self.config_file, 'r', encoding='utf-8') as f:
+                    loaded_config = json.load(f)
+                    # Merge com configuração padrão para ter todas as chaves
+                    return self._deep_merge(self.default_config, loaded_config)
+            else:
+                # Criar arquivo de configuração padrão
+                self.save_config(self.default_config)
+                return self.default_config.copy()
+        except Exception as e:
+            logger.warning(f"Erro ao carregar configuração: {e}, usando padrão")
+            return self.default_config.copy()
+    
+    def _deep_merge(self, base: dict, override: dict) -> dict:
+        """Merge profundo de dicionários"""
+        result = base.copy()
+        for key, value in override.items():
+            if key in result and isinstance(result[key], dict) and isinstance(value, dict):
+                result[key] = self._deep_merge(result[key], value)
+            else:
+                result[key] = value
+        return result
+    
+    def _apply_env_overrides(self):
+        """Aplica overrides de variáveis de ambiente"""
+        env_mappings = {
+            'MANHWA_DEBUG': ('app', 'debug'),
+            'MANHWA_LOG_LEVEL': ('logging', 'level'),
+            'MANHWA_THEME': ('ui', 'theme'),
+            'MANHWA_CACHE_SIZE': ('cache', 'max_memory_mb'),
+            'MANHWA_MAX_WORKERS': ('scraping', 'max_workers'),
+            'MANHWA_REQUEST_TIMEOUT': ('scraping', 'request_timeout')
+        }
+        
+        for env_var, (section, key) in env_mappings.items():
+            value = os.getenv(env_var)
+            if value:
+                try:
+                    # Tentar converter tipos apropriados
+                    if key in ['debug', 'file_rotation', 'show_debug', 'auto_refresh_metrics', 'enable_notifications']:
+                        value = value.lower() in ('true', '1', 'yes', 'on')
+                    elif key in ['max_memory_mb', 'max_workers', 'request_timeout', 'metrics_refresh_interval']:
+                        value = int(value)
+                    elif key in ['memory_threshold_gb']:
+                        value = float(value)
+                    
+                    self.config[section][key] = value
+                    logger.info(f"Override de env aplicado: {env_var} = {value}")
+                except Exception as e:
+                    logger.warning(f"Erro ao aplicar override {env_var}: {e}")
+    
+    def get(self, section: str, key: str = None, default=None):
+        """Obtém valor de configuração"""
+        try:
+            if key is None:
+                return self.config.get(section, default)
+            return self.config.get(section, {}).get(key, default)
+        except Exception:
+            return default
+    
+    def set(self, section: str, key: str, value):
+        """Define valor de configuração"""
+        if section not in self.config:
+            self.config[section] = {}
+        self.config[section][key] = value
+    
+    def save_config(self, config: dict = None):
+        """Salva configuração no arquivo"""
+        try:
+            config_to_save = config or self.config
+            with open(self.config_file, 'w', encoding='utf-8') as f:
+                json.dump(config_to_save, f, indent=2, ensure_ascii=False)
+            logger.info(f"Configuração salva em {self.config_file}")
+        except Exception as e:
+            logger.error(f"Erro ao salvar configuração: {e}")
+    
+    def reset_to_default(self):
+        """Restaura configuração padrão"""
+        self.config = self.default_config.copy()
+        self.save_config()
+        logger.info("Configuração restaurada para padrão")
+    
+    def export_config(self) -> str:
+        """Exporta configuração como JSON string"""
+        return json.dumps(self.config, indent=2, ensure_ascii=False)
+    
+    def render_config_editor(self):
+        """Renderiza editor de configuração na interface"""
+        st.markdown("### ⚙️ Editor de Configuração")
+        
+        # Tabs para diferentes seções
+        sections = list(self.config.keys())
+        selected_section = st.selectbox("Seção:", sections)
+        
+        if selected_section:
+            st.markdown(f"#### 📋 {selected_section.title()}")
+            
+            section_config = self.config[selected_section]
+            updated = False
+            
+            for key, value in section_config.items():
+                col1, col2 = st.columns([1, 2])
+                
+                with col1:
+                    st.markdown(f"**{key}:**")
+                
+                with col2:
+                    if isinstance(value, bool):
+                        new_value = st.checkbox(f"", value=value, key=f"{selected_section}_{key}")
+                    elif isinstance(value, int):
+                        new_value = st.number_input(f"", value=value, key=f"{selected_section}_{key}")
+                    elif isinstance(value, float):
+                        new_value = st.number_input(f"", value=value, format="%.2f", key=f"{selected_section}_{key}")
+                    elif isinstance(value, dict):
+                        new_value = st.text_area(f"", value=json.dumps(value, indent=2), key=f"{selected_section}_{key}")
+                        try:
+                            new_value = json.loads(new_value)
+                        except:
+                            st.error("JSON inválido")
+                            new_value = value
+                    else:
+                        new_value = st.text_input(f"", value=str(value), key=f"{selected_section}_{key}")
+                    
+                    if new_value != value:
+                        self.config[selected_section][key] = new_value
+                        updated = True
+            
+            # Botões de controle
+            col1, col2, col3 = st.columns(3)
+            
+            with col1:
+                if st.button("💾 Salvar Alterações"):
+                    self.save_config()
+                    st.success("Configuração salva!")
+                    st.rerun()
+            
+            with col2:
+                if st.button("📤 Exportar JSON"):
+                    st.text_area("Configuração JSON:", self.export_config(), height=300)
+            
+            with col3:
+                if st.button("🔄 Resetar Padrão"):
+                    self.reset_to_default()
+                    st.success("Configuração resetada!")
+                    st.rerun()
+
+# Inicializar gerenciador de configuração
+config_manager = ConfigManager()
+
+# Inicializar gerenciador de temas
+theme_manager = ThemeManager()
+
+# Aplicar tema e CSS customizado
+theme_manager.apply_custom_css()
+
 st.title("🖼️ Extrator de Painéis de Manhwa")
 st.markdown('<div id="topo"></div>', unsafe_allow_html=True)
 
@@ -1132,10 +2014,15 @@ def baixar_imagem_url_otimizada(url: str) -> Optional[bytes]:
 
 # NOVAS FUNÇÕES PARA WEB SCRAPING
 
-@st.cache_data(ttl=300, show_spinner=False)  # Cache por 5 minutos
 def fazer_requisicao_web(url: str) -> Optional[BeautifulSoup]:
-    """Faz requisição web e retorna BeautifulSoup"""
+    """Faz requisição web e retorna BeautifulSoup com cache inteligente"""
     try:
+        # Verificar cache primeiro
+        cached_content = intelligent_cache.get(url, 'webpage')
+        if cached_content:
+            logger.debug(f"Requisição web obtida do cache: {url}")
+            return BeautifulSoup(cached_content, 'html.parser')
+        
         logger.info(f"Fazendo requisição para: {url}")
         
         # Aplicar rate limiting inteligente
@@ -1148,6 +2035,10 @@ def fazer_requisicao_web(url: str) -> Optional[BeautifulSoup]:
         response = requests.get(url, headers=SCRAPING_HEADERS, timeout=REQUEST_TIMEOUT)
         response.raise_for_status()
         logger.info(f"Requisição bem-sucedida para {url} (status: {response.status_code})")
+        
+        # Armazenar no cache
+        intelligent_cache.set(url, response.content, 'webpage')
+        
         return BeautifulSoup(response.content, 'html.parser')
     except Exception as e:
         logger.error(f"Erro ao acessar URL {url}: {e}")
@@ -1155,7 +2046,13 @@ def fazer_requisicao_web(url: str) -> Optional[BeautifulSoup]:
         return None
 
 def extrair_info_manhwa_manhwatop(soup: BeautifulSoup, base_url: str) -> Dict:
-    """Extrai informações do manhwa do ManhwaTop"""
+    """Extrai informações do manhwa do ManhwaTop com cache"""
+    # Verificar cache primeiro
+    cached_info = intelligent_cache.get(base_url, 'chapter_list')
+    if cached_info:
+        logger.debug(f"Informações do manhwa obtidas do cache: {base_url}")
+        return cached_info
+    
     logger.info(f"Extraindo informações do manhwa de {base_url}")
     info = {
         "titulo": "Manhwa",
@@ -1222,6 +2119,9 @@ def extrair_info_manhwa_manhwatop(soup: BeautifulSoup, base_url: str) -> Dict:
         # Ordenar capítulos por número
         info["capitulos"].sort(key=lambda x: float(x["numero"]) if x["numero"].replace('.', '').isdigit() else 999)
         logger.info(f"Extraídos {len(info['capitulos'])} capítulos do manhwa '{info['titulo']}'")
+        
+        # Armazenar no cache
+        intelligent_cache.set(base_url, info, 'chapter_list')
         
     except Exception as e:
         logger.error(f"Erro ao extrair informações do manhwa: {e}", exc_info=True)
@@ -1392,11 +2292,13 @@ if rate_limiter.requests:
             else:
                 status = "🟢"  # Ok
             
-            st.sidebar.metric(
-                f"{status} {domain}",
-                f"{recent_requests}/{limit}",
-                help=f"Requisições na última hora"
+            # Criar badge animado
+            badge_status = "error" if recent_requests >= limit * 0.8 else ("warning" if recent_requests >= limit * 0.5 else "online")
+            badge_html = theme_manager.create_status_badge(
+                f"{domain}: {recent_requests}/{limit}",
+                badge_status
             )
+            st.sidebar.markdown(f"{status} {badge_html}", unsafe_allow_html=True)
 else:
     st.sidebar.info("🟢 Nenhuma requisição recente")
 
@@ -1422,6 +2324,33 @@ if hasattr(async_manager, 'session') and async_manager.session:
 else:
     st.sidebar.info("💤 Sessão assíncrona inativa")
 
+# Estatísticas do cache
+st.sidebar.markdown("### 💾 Cache Inteligente")
+cache_stats = intelligent_cache.get_stats()
+if cache_stats['total_items'] > 0:
+    st.sidebar.metric(
+        "Hit Rate",
+        f"{cache_stats['hit_rate']:.1%}",
+        delta="Ótimo" if cache_stats['hit_rate'] > 0.8 else "Baixo"
+    )
+    
+    col1, col2 = st.sidebar.columns(2)
+    with col1:
+        st.metric("Itens", cache_stats['total_items'])
+    with col2:
+        st.metric("Memória", f"{cache_stats['memory_usage_mb']:.1f}MB")
+    
+    # Botão de limpeza rápida
+    if st.sidebar.button("🧹 Limpar Cache"):
+        intelligent_cache._cleanup_expired()
+        st.sidebar.success("Cache limpo!")
+        st.rerun()
+else:
+    st.sidebar.info("📭 Cache vazio")
+
+# Seletor de temas
+theme_manager.render_theme_selector()
+
 # Debug info
 if st.sidebar.checkbox("🔍 Debug"):
     st.sidebar.write(f"Painéis únicos: {len(st.session_state.paineis_processados)}")
@@ -1429,7 +2358,7 @@ if st.sidebar.checkbox("🔍 Debug"):
     st.sidebar.write(f"Manhwas cache: {len(st.session_state.capitulos_cache)}")
 
 # Abas principais
-tab1, tab2, tab3, tab4, tab5 = st.tabs(["🖼️ Extrair Painéis", "🌐 Web Scraping", "📋 Capítulos", "📦 Download", "📊 Métricas"])
+tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["🖼️ Extrair Painéis", "🌐 Web Scraping", "📋 Capítulos", "📦 Download", "📊 Métricas", "⚙️ Configurações"])
 
 with tab1:
     modo = st.radio("**Escolha o modo:**", 
@@ -1793,6 +2722,9 @@ with tab5:
     # Dashboard principal
     metrics_collector.display_dashboard()
     
+    # Dashboard do cache
+    intelligent_cache.display_dashboard()
+    
     # Seção de configurações avançadas
     with st.expander("⚙️ Configurações Avançadas"):
         st.markdown("#### Limites de Alerta")
@@ -1813,6 +2745,135 @@ with tab5:
     if auto_refresh:
         time.sleep(10)
         st.rerun()
+
+with tab6:
+    st.markdown("# ⚙️ Configurações do Sistema")
+    
+    st.markdown("""
+    <div class="info-card">
+        <h3>🎛️ Painel de Configuração</h3>
+        <p>Configure todos os aspectos da aplicação através desta interface intuitiva. 
+        As configurações são salvas automaticamente e persistem entre sessões.</p>
+    </div>
+    """, unsafe_allow_html=True)
+    
+    # Editor de configuração
+    config_manager.render_config_editor()
+    
+    st.markdown("---")
+    
+    # Seção de variáveis de ambiente
+    st.markdown("### 🌍 Variáveis de Ambiente")
+    st.markdown("""
+    Você pode configurar a aplicação usando variáveis de ambiente:
+    
+    - `MANHWA_DEBUG=true` - Ativa modo debug
+    - `MANHWA_LOG_LEVEL=DEBUG` - Define nível de log  
+    - `MANHWA_THEME=cyberpunk` - Define tema padrão
+    - `MANHWA_CACHE_SIZE=500` - Tamanho do cache (MB)
+    - `MANHWA_MAX_WORKERS=8` - Número de workers
+    - `MANHWA_REQUEST_TIMEOUT=30` - Timeout de requisições
+    """)
+    
+    # Informações do sistema
+    st.markdown("### 💻 Informações do Sistema")
+    
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        st.markdown(f"""
+        **Aplicação:**
+        - Nome: {config_manager.get('app', 'name')}
+        - Versão: {config_manager.get('app', 'version')}
+        - Debug: {config_manager.get('app', 'debug')}
+        
+        **Cache:**
+        - Tamanho máximo: {config_manager.get('cache', 'max_memory_mb')}MB
+        - TTL imagens: {config_manager.get('cache', 'ttl', {}).get('image', 0)}s
+        """)
+    
+    with col2:
+        st.markdown(f"""
+        **Scraping:**
+        - Timeout: {config_manager.get('scraping', 'request_timeout')}s
+        - Max workers: {config_manager.get('scraping', 'max_workers')}
+        - User agent: {config_manager.get('scraping', 'user_agent', 'N/A')[:50]}...
+        
+        **Alertas:**
+        - Taxa sucesso min: {config_manager.get('alerts', 'success_rate_threshold')}%
+        - Limite memória: {config_manager.get('alerts', 'memory_threshold_gb')}GB
+        """)
+    
+    # Backup e restauração
+    st.markdown("### 💾 Backup e Restauração")
+    
+    col1, col2, col3 = st.columns(3)
+    
+    with col1:
+        if st.button("📥 Backup Configuração"):
+            backup_data = {
+                "timestamp": datetime.now().isoformat(),
+                "config": config_manager.config,
+                "version": config_manager.get('app', 'version')
+            }
+            
+            st.download_button(
+                "💾 Download Backup",
+                json.dumps(backup_data, indent=2, ensure_ascii=False),
+                file_name=f"manhwa_config_backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
+                mime="application/json"
+            )
+    
+    with col2:
+        uploaded_config = st.file_uploader(
+            "📤 Restaurar Configuração",
+            type=['json'],
+            help="Faça upload de um arquivo de backup de configuração"
+        )
+        
+        if uploaded_config:
+            try:
+                backup_data = json.load(uploaded_config)
+                if 'config' in backup_data:
+                    config_manager.config = backup_data['config']
+                    config_manager.save_config()
+                    st.success("✅ Configuração restaurada com sucesso!")
+                    st.rerun()
+                else:
+                    st.error("❌ Arquivo de backup inválido")
+            except Exception as e:
+                st.error(f"❌ Erro ao restaurar: {e}")
+    
+    with col3:
+        if st.button("🔄 Resetar Tudo"):
+            if st.checkbox("⚠️ Confirmar reset completo"):
+                config_manager.reset_to_default()
+                # Limpar cache também
+                intelligent_cache.clear_all()
+                st.success("✅ Sistema resetado para padrão!")
+                st.rerun()
+    
+    # Status das configurações
+    st.markdown("### 📊 Status das Configurações")
+    
+    config_status = {
+        "Arquivo de config": "✅ Carregado" if os.path.exists("config.json") else "❌ Não encontrado",
+        "Logs habilitados": "✅ Sim" if config_manager.get('logging', 'level') != 'DISABLED' else "❌ Não",
+        "Cache ativo": "✅ Sim" if config_manager.get('cache', 'max_memory_mb', 0) > 0 else "❌ Não",
+        "Rate limiting": "✅ Ativo" if config_manager.get('rate_limits') else "❌ Inativo",
+        "Tema customizado": "✅ Sim" if config_manager.get('ui', 'theme') != 'default' else "❌ Padrão"
+    }
+    
+    for item, status in config_status.items():
+        st.markdown(f"- **{item}**: {status}")
+    
+    st.markdown("---")
+    st.markdown("""
+    <div style="text-align: center; padding: 2rem; background: linear-gradient(90deg, #FF4B4B, #FF6B6B); 
+                -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text; font-weight: bold;">
+        🚀 Configuração Profissional • Sistema Enterprise-Ready • Manhwa Extractor v2.0
+    </div>
+    """, unsafe_allow_html=True)
 
 # Rodapé com informações adicionais
 st.markdown("---")
