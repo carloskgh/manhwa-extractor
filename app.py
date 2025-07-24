@@ -147,7 +147,9 @@ def ordenar_paineis_otimizado(paineis: List[dict], y_tol: int = Y_TOLERANCE) -> 
         x_coords = np.array([p["x"] for p in paineis])
         sorted_indices = np.lexsort((x_coords, y_coords))
         return [paineis[i] for i in sorted_indices]
-    except:
+    except (KeyError, ValueError, IndexError, TypeError) as e:
+        # Fallback to original sorting if numpy operations fail
+        print(f"Warning: Optimized sorting failed ({e}), using fallback")
         return ordenar_paineis_original(paineis, y_tol)
 
 def ordenar_paineis_original(paineis: List[dict], y_tol: int = Y_TOLERANCE) -> List[dict]:
@@ -278,24 +280,83 @@ def validar_url_cached(url: str) -> bool:
         r'(?::[0-9]{1,5})?'
         r'(?:/\S*)?$', re.IGNORECASE)
     
-    return bool(url_pattern.match(url))
+    if not url_pattern.match(url):
+        return False
+    
+    # Additional security checks to prevent SSRF
+    try:
+        parsed = urlparse(url)
+        hostname = parsed.hostname
+        
+        # Block localhost and internal IPs
+        if hostname in ['localhost', '127.0.0.1', '0.0.0.0']:
+            return False
+        
+        # Block private IP ranges
+        import ipaddress
+        try:
+            ip = ipaddress.ip_address(hostname)
+            if ip.is_private or ip.is_loopback or ip.is_reserved:
+                return False
+        except (ValueError, ipaddress.AddressValueError):
+            # Not an IP address, likely a domain name - continue validation
+            pass
+        
+        # Block suspicious ports
+        port = parsed.port
+        if port and port in [22, 23, 25, 53, 135, 139, 445, 993, 995]:
+            return False
+            
+        return True
+    except Exception:
+        return False
 
 def baixar_imagem_url_otimizada(url: str) -> Optional[bytes]:
     try:
         if not validar_url_cached(url):
             return None
             
+        # First, make a HEAD request to check content-length
+        try:
+            head_response = requests.head(url, headers=SCRAPING_HEADERS, timeout=REQUEST_TIMEOUT)
+            content_length = head_response.headers.get('content-length')
+            if content_length and int(content_length) > 10 * 1024 * 1024:  # 10MB limit
+                print(f"Warning: Image too large ({content_length} bytes), skipping")
+                return None
+        except (requests.RequestException, ValueError):
+            # If HEAD request fails, continue with GET but be more cautious
+            pass
+            
         response = requests.get(url, headers=SCRAPING_HEADERS, timeout=REQUEST_TIMEOUT, stream=True)
         response.raise_for_status()
         
-        content = b""
-        for chunk in response.iter_content(chunk_size=8192):
-            content += chunk
-            if len(content) > 50 * 1024 * 1024:
-                raise ValueError("Imagem muito grande")
+        # Verify content type
+        content_type = response.headers.get('content-type', '').lower()
+        if not any(img_type in content_type for img_type in ['image/', 'jpeg', 'png', 'webp']):
+            print(f"Warning: Unexpected content type: {content_type}")
+            return None
         
+        content = b""
+        max_size = 10 * 1024 * 1024  # Reduced to 10MB for safety
+        
+        for chunk in response.iter_content(chunk_size=8192):
+            if chunk:  # Filter out keep-alive chunks
+                content += chunk
+                if len(content) > max_size:
+                    print(f"Warning: Image size exceeded {max_size} bytes, truncating download")
+                    response.close()
+                    return None
+        
+        # Final validation - ensure it's actually an image
+        if len(content) < 100:  # Too small to be a valid image
+            return None
+            
         return content
+    except requests.RequestException as e:
+        print(f"Network error downloading image: {e}")
+        return None
     except Exception as e:
+        print(f"Unexpected error downloading image: {e}")
         return None
 
 # NOVAS FUNÇÕES PARA WEB SCRAPING
@@ -602,8 +663,9 @@ with tab3:
                     if capa_data:
                         capa_img = Image.open(io.BytesIO(capa_data))
                         st.image(capa_img, width=200)
-                except:
+                except (requests.RequestException, IOError, ValueError) as e:
                     st.write("🖼️ Capa não disponível")
+                    print(f"Warning: Failed to load cover image: {e}")
         
         with col2:
             st.markdown(f"## 📚 {info['titulo']}")
