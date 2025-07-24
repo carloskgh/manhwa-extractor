@@ -281,17 +281,26 @@ class AsyncOperationsManager:
     
     def __init__(self):
         self.session = None
-        # Usar configuração externa se disponível
-        max_workers = config_manager.get('scraping', 'max_workers', MAX_WORKERS)
-        self.semaphore = asyncio.Semaphore(max_workers)  # Limite de conexões simultâneas
+        # Usar valor padrão na inicialização, configuração será aplicada depois
+        self.semaphore = asyncio.Semaphore(MAX_WORKERS)  # Limite de conexões simultâneas
         self.process_pool = ProcessPoolExecutor(max_workers=2)  # Para processamento pesado
-        logger.info(f"🚀 Gerenciador de operações assíncronas inicializado - Workers: {max_workers}")
+        self.config_manager = None  # Será definido depois
+        logger.info(f"🚀 Gerenciador de operações assíncronas inicializado - Workers padrão: {MAX_WORKERS}")
+    
+    def set_config_manager(self, config_manager):
+        """Define o config manager e ajusta configurações"""
+        self.config_manager = config_manager
+        # Reconfigurar semáforo com valor do config
+        max_workers = config_manager.get('scraping', 'max_workers', MAX_WORKERS)
+        self.semaphore = asyncio.Semaphore(max_workers)
+        logger.info(f"🔧 Async manager reconfigurado - Workers: {max_workers}")
     
     async def get_session(self):
         """Obtém ou cria sessão HTTP assíncrona"""
         if self.session is None or self.session.closed:
             timeout = aiohttp.ClientTimeout(total=REQUEST_TIMEOUT)
-            max_workers = config_manager.get('scraping', 'max_workers', MAX_WORKERS)
+            # Usar config_manager se disponível, senão usar padrão
+            max_workers = self.config_manager.get('scraping', 'max_workers', MAX_WORKERS) if self.config_manager else MAX_WORKERS
             connector = aiohttp.TCPConnector(limit=max_workers, limit_per_host=5)
             self.session = aiohttp.ClientSession(
                 headers=SCRAPING_HEADERS,
@@ -707,11 +716,14 @@ class ConfigManager:
                     st.success("Configuração resetada!")
                     st.rerun()
 
-# Inicializar gerenciador de configuração primeiro (necessário para async_manager)
+# Inicializar gerenciador de configuração primeiro
 config_manager = ConfigManager()
 
 # Inicializar gerenciador assíncrono
 async_manager = AsyncOperationsManager()
+
+# Configurar async_manager com config_manager
+async_manager.set_config_manager(config_manager)
 
 # Sistema de Monitoramento e Métricas
 from dataclasses import dataclass, field
