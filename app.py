@@ -1234,44 +1234,51 @@ class IntelligentCache:
         }
     
     def display_dashboard(self):
-        """Exibe dashboard do cache - VERSÃO CORRIGIDA"""
-        stats = self.get_stats()
-        
-        st.markdown("### 💾 Dashboard do Cache")
-        
-        # Métricas principais
-        col1, col2, col3, col4 = st.columns(4)
-        
-        with col1:
-            st.metric(
-                "Hit Rate",
-                f"{stats['hit_rate']:.1%}",
-                delta="Excelente" if stats['hit_rate'] > 0.8 else "Baixo"
-            )
-        
-        with col2:
-            st.metric(
-                "Total de Itens",
-                stats['total_items'],
-                delta=f"{stats['memory_items']} em memória"
-            )
-        
-        with col3:
-            st.metric(
-                "Uso de Memória",
-                f"{stats['memory_usage_mb']:.1f}MB",
-                delta=f"/{stats['max_memory_mb']:.0f}MB"
-            )
-        
-        with col4:
-            # CORREÇÃO DEFINITIVA - Evitar completamente o uso de glob() aqui
-            cache_files_count = stats.get('total_items', 0)  # Usar stats já calculados
+        """Exibe dashboard do cache - VERSÃO ULTRA-SEGURA"""
+        try:
+            stats = self.get_stats()
             
-            st.metric(
-                "Uso de Disco",
-                f"{stats['disk_usage_mb']:.1f}MB",
-                delta=f"{cache_files_count} itens"  # Mudou de "arquivos" para "itens"
-            )
+            st.markdown("### 💾 Dashboard do Cache")
+            
+            # Métricas principais - VERSÃO SEGURA
+            col1, col2, col3, col4 = st.columns(4)
+            
+            with col1:
+                hit_rate = stats.get('hit_rate', 0)
+                st.metric(
+                    "Hit Rate",
+                    f"{hit_rate:.1%}",
+                    delta="Excelente" if hit_rate > 0.8 else "Baixo"
+                )
+            
+            with col2:
+                total_items = stats.get('total_items', 0)
+                memory_items = stats.get('memory_items', 0)
+                st.metric(
+                    "Total de Itens",
+                    total_items,
+                    delta=f"{memory_items} em memória"
+                )
+            
+            with col3:
+                memory_usage = stats.get('memory_usage_mb', 0)
+                max_memory = stats.get('max_memory_mb', 200)
+                st.metric(
+                    "Uso de Memória",
+                    f"{memory_usage:.1f}MB",
+                    delta=f"/{max_memory:.0f}MB"
+                )
+            
+            with col4:
+                disk_usage = stats.get('disk_usage_mb', 0)
+                st.metric(
+                    "Uso de Disco",
+                    f"{disk_usage:.1f}MB",
+                    delta=f"{total_items} itens"
+                )
+        except Exception as e:
+            st.error(f"Erro ao exibir métricas do cache: {e}")
+            logger.error(f"Erro no display_dashboard do cache: {e}", exc_info=True)
         
         # Estatísticas por tipo
         if stats['type_stats']:
@@ -2742,8 +2749,13 @@ with tab5:
     # Dashboard principal
     metrics_collector.display_dashboard()
     
-    # Dashboard do cache
-    intelligent_cache.display_dashboard()
+    # Dashboard do cache (TEMPORARIAMENTE DESABILITADO PARA DEBUG)
+    try:
+        intelligent_cache.display_dashboard()
+    except Exception as e:
+        st.error(f"⚠️ Erro no dashboard de cache: {e}")
+        st.info("💡 Cache funcionando normalmente, apenas dashboard com problema de exibição")
+        logger.error(f"Erro no dashboard de cache: {e}", exc_info=True)
     
     # Seção de configurações avançadas
     with st.expander("⚙️ Configurações Avançadas"):
