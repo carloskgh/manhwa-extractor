@@ -274,20 +274,25 @@ class InputValidator:
 input_validator = InputValidator()
 
 # Sistema de Operações Assíncronas
+MAX_WORKERS = 4  # Constante para workers assíncronos
+
 class AsyncOperationsManager:
     """Gerenciador de operações assíncronas para melhor performance"""
     
     def __init__(self):
         self.session = None
-        self.semaphore = asyncio.Semaphore(MAX_WORKERS)  # Limite de conexões simultâneas
+        # Usar configuração externa se disponível
+        max_workers = config_manager.get('scraping', 'max_workers', MAX_WORKERS)
+        self.semaphore = asyncio.Semaphore(max_workers)  # Limite de conexões simultâneas
         self.process_pool = ProcessPoolExecutor(max_workers=2)  # Para processamento pesado
-        logger.info("🚀 Gerenciador de operações assíncronas inicializado")
+        logger.info(f"🚀 Gerenciador de operações assíncronas inicializado - Workers: {max_workers}")
     
     async def get_session(self):
         """Obtém ou cria sessão HTTP assíncrona"""
         if self.session is None or self.session.closed:
             timeout = aiohttp.ClientTimeout(total=REQUEST_TIMEOUT)
-            connector = aiohttp.TCPConnector(limit=MAX_WORKERS, limit_per_host=5)
+            max_workers = config_manager.get('scraping', 'max_workers', MAX_WORKERS)
+            connector = aiohttp.TCPConnector(limit=max_workers, limit_per_host=5)
             self.session = aiohttp.ClientSession(
                 headers=SCRAPING_HEADERS,
                 timeout=timeout,
@@ -1667,7 +1672,6 @@ REQUEST_TIMEOUT = 15
 Y_TOLERANCE = 40
 PREVIEW_LIMIT = 20
 COLS_PER_ROW = 4
-MAX_WORKERS = 4
 BATCH_SIZE = 10
 
 # Lock para thread safety
