@@ -17,6 +17,46 @@ from bs4 import BeautifulSoup
 import time
 from urllib.parse import urljoin, urlparse
 import json
+import logging
+import sys
+from datetime import datetime
+
+# Configuração do sistema de logging
+def setup_logging():
+    """Configura o sistema de logging profissional"""
+    # Criar diretório de logs se não existir
+    os.makedirs("logs", exist_ok=True)
+    
+    # Configurar formato dos logs
+    log_format = "%(asctime)s - %(name)s - %(levelname)s - %(funcName)s:%(lineno)d - %(message)s"
+    date_format = "%Y-%m-%d %H:%M:%S"
+    
+    # Configurar logging
+    logging.basicConfig(
+        level=logging.INFO,
+        format=log_format,
+        datefmt=date_format,
+        handlers=[
+            # Arquivo de log com rotação diária
+            logging.FileHandler(
+                f"logs/manhwa_extractor_{datetime.now().strftime('%Y%m%d')}.log",
+                encoding='utf-8'
+            ),
+            # Console output para desenvolvimento
+            logging.StreamHandler(sys.stdout)
+        ]
+    )
+    
+    # Configurar níveis específicos para bibliotecas externas
+    logging.getLogger("urllib3").setLevel(logging.WARNING)
+    logging.getLogger("requests").setLevel(logging.WARNING)
+    logging.getLogger("PIL").setLevel(logging.WARNING)
+    
+    return logging.getLogger(__name__)
+
+# Inicializar logging
+logger = setup_logging()
+logger.info("🚀 Aplicação Extrator de Painéis de Manhwa iniciada")
 
 # Configuração da página
 st.set_page_config(page_title="Extrator de Painéis de Manhwa", layout="wide")
@@ -59,7 +99,7 @@ URL_MODELO_DROPBOX = "https://www.dropbox.com/scl/fi/a743aqjqzau3fxy4fss4a/best.
 def baixar_modelo_yolo(dropbox_url, destino=MODELO_PATH):
     if not os.path.exists(destino):
         try:
-            print("📦 Baixando modelo YOLO (best.pt)...")
+            logger.info("📦 Iniciando download do modelo YOLO (best.pt)...")
             os.makedirs(os.path.dirname(destino), exist_ok=True)
             response = requests.get(dropbox_url, stream=True)
             response.raise_for_status()
@@ -67,16 +107,16 @@ def baixar_modelo_yolo(dropbox_url, destino=MODELO_PATH):
                 for chunk in response.iter_content(chunk_size=8192):
                     if chunk:
                         f.write(chunk)
-            print("✅ Modelo baixado com sucesso!")
+            logger.info("✅ Modelo YOLO baixado com sucesso!")
         except Exception as e:
-            print(f"❌ Erro ao baixar modelo: {e}")
+            logger.error(f"❌ Erro ao baixar modelo YOLO: {e}", exc_info=True)
 
 def carregar_modelo():
     try:
         modelo = YOLO(MODELO_PATH)
         return modelo
     except Exception as e:
-        print(f"❌ Erro ao carregar o modelo: {e}")
+        logger.error(f"❌ Erro ao carregar o modelo YOLO: {e}", exc_info=True)
         return None
 
 # Executar download e carregamento
@@ -85,10 +125,9 @@ model = carregar_modelo()
 
 # Teste simples (evite executar na nuvem, só para checagem)
 if model:
-    print("✅ Modelo YOLO carregado com sucesso!")
+    logger.info("✅ Modelo YOLO carregado com sucesso!")
 else:
-    print("⚠️ Modelo não foi carregado.")
-
+    logger.warning("⚠️ Modelo YOLO não foi carregado - usando fallback para contornos")
 
 # Inicialização do estado da sessão
 def init_session_state():
@@ -149,7 +188,7 @@ def ordenar_paineis_otimizado(paineis: List[dict], y_tol: int = Y_TOLERANCE) -> 
         return [paineis[i] for i in sorted_indices]
     except (KeyError, ValueError, IndexError, TypeError) as e:
         # Fallback to original sorting if numpy operations fail
-        print(f"Warning: Optimized sorting failed ({e}), using fallback")
+        logger.warning(f"Ordenação otimizada falhou ({e}), usando fallback para ordenação original")
         return ordenar_paineis_original(paineis, y_tol)
 
 def ordenar_paineis_original(paineis: List[dict], y_tol: int = Y_TOLERANCE) -> List[dict]:
@@ -260,14 +299,18 @@ def extrair_paineis_hibrido_otimizado(img, yolo_threshold=1, img_id=None) -> Lis
 
 def processar_imagem_otimizada(img_data: bytes, nome_fonte: str) -> Tuple[List, Optional[str]]:
     try:
+        logger.info(f"Processando imagem: {nome_fonte} ({len(img_data)} bytes)")
         img_pil = carregar_e_redimensionar_imagem(img_data)
         if img_pil is None:
+            logger.warning(f"Falha ao carregar imagem: {nome_fonte}")
             return [], "Erro ao carregar imagem"
             
         img = cv2.cvtColor(np.array(img_pil), cv2.COLOR_RGB2BGR)
         paineis = extrair_paineis_hibrido_otimizado(img, img_id=nome_fonte)
+        logger.info(f"Extraídos {len(paineis)} painéis de {nome_fonte}")
         return paineis, None
     except Exception as e:
+        logger.error(f"Erro ao processar imagem {nome_fonte}: {e}", exc_info=True)
         return [], str(e)
 
 @lru_cache(maxsize=100)
@@ -321,7 +364,7 @@ def baixar_imagem_url_otimizada(url: str) -> Optional[bytes]:
             head_response = requests.head(url, headers=SCRAPING_HEADERS, timeout=REQUEST_TIMEOUT)
             content_length = head_response.headers.get('content-length')
             if content_length and int(content_length) > 10 * 1024 * 1024:  # 10MB limit
-                print(f"Warning: Image too large ({content_length} bytes), skipping")
+                logger.warning(f"Imagem muito grande ({content_length} bytes), ignorando download")
                 return None
         except (requests.RequestException, ValueError):
             # If HEAD request fails, continue with GET but be more cautious
@@ -333,7 +376,7 @@ def baixar_imagem_url_otimizada(url: str) -> Optional[bytes]:
         # Verify content type
         content_type = response.headers.get('content-type', '').lower()
         if not any(img_type in content_type for img_type in ['image/', 'jpeg', 'png', 'webp']):
-            print(f"Warning: Unexpected content type: {content_type}")
+            logger.warning(f"Content-type inesperado para imagem: {content_type}")
             return None
         
         content = b""
@@ -343,7 +386,7 @@ def baixar_imagem_url_otimizada(url: str) -> Optional[bytes]:
             if chunk:  # Filter out keep-alive chunks
                 content += chunk
                 if len(content) > max_size:
-                    print(f"Warning: Image size exceeded {max_size} bytes, truncating download")
+                    logger.warning(f"Tamanho da imagem excedeu {max_size} bytes, truncando download")
                     response.close()
                     return None
         
@@ -353,10 +396,10 @@ def baixar_imagem_url_otimizada(url: str) -> Optional[bytes]:
             
         return content
     except requests.RequestException as e:
-        print(f"Network error downloading image: {e}")
+        logger.error(f"Erro de rede ao baixar imagem de {url}: {e}")
         return None
     except Exception as e:
-        print(f"Unexpected error downloading image: {e}")
+        logger.error(f"Erro inesperado ao baixar imagem de {url}: {e}", exc_info=True)
         return None
 
 # NOVAS FUNÇÕES PARA WEB SCRAPING
@@ -365,15 +408,19 @@ def baixar_imagem_url_otimizada(url: str) -> Optional[bytes]:
 def fazer_requisicao_web(url: str) -> Optional[BeautifulSoup]:
     """Faz requisição web e retorna BeautifulSoup"""
     try:
+        logger.info(f"Fazendo requisição para: {url}")
         response = requests.get(url, headers=SCRAPING_HEADERS, timeout=REQUEST_TIMEOUT)
         response.raise_for_status()
+        logger.info(f"Requisição bem-sucedida para {url} (status: {response.status_code})")
         return BeautifulSoup(response.content, 'html.parser')
     except Exception as e:
+        logger.error(f"Erro ao acessar URL {url}: {e}")
         st.error(f"❌ Erro ao acessar URL: {e}")
         return None
 
 def extrair_info_manhwa_manhwatop(soup: BeautifulSoup, base_url: str) -> Dict:
     """Extrai informações do manhwa do ManhwaTop"""
+    logger.info(f"Extraindo informações do manhwa de {base_url}")
     info = {
         "titulo": "Manhwa",
         "capa": None,
@@ -438,8 +485,10 @@ def extrair_info_manhwa_manhwatop(soup: BeautifulSoup, base_url: str) -> Dict:
         
         # Ordenar capítulos por número
         info["capitulos"].sort(key=lambda x: float(x["numero"]) if x["numero"].replace('.', '').isdigit() else 999)
+        logger.info(f"Extraídos {len(info['capitulos'])} capítulos do manhwa '{info['titulo']}'")
         
     except Exception as e:
+        logger.error(f"Erro ao extrair informações do manhwa: {e}", exc_info=True)
         st.error(f"Erro ao extrair informações: {e}")
     
     return info
@@ -556,6 +605,38 @@ st.sidebar.markdown("### 📊 Estatísticas")
 st.sidebar.metric("Painéis extraídos", len(st.session_state.painel_coletor))
 st.sidebar.metric("Imagens processadas", len(st.session_state.imagens_processadas))
 
+# Sistema de logs na sidebar
+st.sidebar.markdown("### 📋 Logs do Sistema")
+if st.sidebar.checkbox("🔍 Mostrar Logs", help="Exibe logs em tempo real"):
+    log_level = st.sidebar.selectbox(
+        "Nível de Log:",
+        ["DEBUG", "INFO", "WARNING", "ERROR"],
+        index=1
+    )
+    
+    # Configurar nível de log dinamicamente
+    numeric_level = getattr(logging, log_level.upper())
+    logger.setLevel(numeric_level)
+    
+    st.sidebar.info(f"📊 Nível atual: {log_level}")
+    
+    # Mostrar últimas linhas do log
+    try:
+        from pathlib import Path
+        log_files = list(Path("logs").glob("manhwa_extractor_*.log"))
+        if log_files:
+            latest_log = max(log_files, key=lambda x: x.stat().st_mtime)
+            with open(latest_log, 'r', encoding='utf-8') as f:
+                lines = f.readlines()
+                if lines:
+                    st.sidebar.text_area(
+                        "Últimos logs:",
+                        ''.join(lines[-10:]),  # Últimas 10 linhas
+                        height=200
+                    )
+    except Exception as e:
+        st.sidebar.error(f"Erro ao ler logs: {e}")
+
 # Botões de controle
 col1, col2 = st.sidebar.columns(2)
 with col1:
@@ -665,7 +746,7 @@ with tab3:
                         st.image(capa_img, width=200)
                 except (requests.RequestException, IOError, ValueError) as e:
                     st.write("🖼️ Capa não disponível")
-                    print(f"Warning: Failed to load cover image: {e}")
+                    logger.warning(f"Falha ao carregar imagem de capa: {e}")
         
         with col2:
             st.markdown(f"## 📚 {info['titulo']}")
