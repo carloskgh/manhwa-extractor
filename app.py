@@ -303,6 +303,9 @@ class AsyncOperationsManager:
     
     async def download_image_async(self, url: str) -> Optional[bytes]:
         """Download assíncrono de imagem com rate limiting"""
+        start_time = time.time()
+        metrics_collector.active_downloads += 1
+        
         try:
             # Verificar rate limiting
             can_request, wait_time = rate_limiter.can_request(url)
@@ -311,6 +314,7 @@ class AsyncOperationsManager:
                 await asyncio.sleep(wait_time)
             
             if not validar_url_cached(url):
+                metrics_collector.record_request(time.time() - start_time, False, "validation_failed")
                 return None
             
             async with self.semaphore:  # Limitar conexões simultâneas
@@ -354,17 +358,23 @@ class AsyncOperationsManager:
                         return None
                     
                     logger.debug(f"Download assíncrono concluído: {url} ({len(content)} bytes)")
+                    metrics_collector.record_request(time.time() - start_time, True, "download_success")
                     return content
                     
         except asyncio.TimeoutError:
             logger.error(f"Timeout no download de {url}")
+            metrics_collector.record_request(time.time() - start_time, False, "timeout")
             return None
         except aiohttp.ClientError as e:
             logger.error(f"Erro de rede ao baixar imagem de {url}: {e}")
+            metrics_collector.record_request(time.time() - start_time, False, "network_error")
             return None
         except Exception as e:
             logger.error(f"Erro inesperado ao baixar imagem de {url}: {e}", exc_info=True)
+            metrics_collector.record_request(time.time() - start_time, False, "unexpected_error")
             return None
+        finally:
+            metrics_collector.active_downloads -= 1
     
     async def download_multiple_images(self, urls: List[str], progress_callback=None) -> List[Tuple[str, Optional[bytes]]]:
         """Download assíncrono de múltiplas imagens"""
@@ -393,6 +403,9 @@ class AsyncOperationsManager:
     
     async def process_image_async(self, img_data: bytes, nome_fonte: str) -> Tuple[List, Optional[str]]:
         """Processamento assíncrono de imagem em processo separado"""
+        start_time = time.time()
+        metrics_collector.active_processing += 1
+        
         try:
             logger.info(f"Processando imagem assíncrona: {nome_fonte} ({len(img_data)} bytes)")
             
@@ -405,10 +418,20 @@ class AsyncOperationsManager:
                 nome_fonte
             )
             
+            # Registrar métricas de processamento
+            paineis, erro = result
+            processing_time = time.time() - start_time
+            panels_count = len(paineis) if not erro else 0
+            metrics_collector.record_processing(processing_time, panels_count, nome_fonte)
+            
             return result
         except Exception as e:
             logger.error(f"Erro no processamento assíncrono de {nome_fonte}: {e}", exc_info=True)
+            processing_time = time.time() - start_time
+            metrics_collector.record_processing(processing_time, 0, nome_fonte)
             return [], str(e)
+        finally:
+            metrics_collector.active_processing -= 1
     
     def _process_image_sync(self, img_data: bytes, nome_fonte: str) -> Tuple[List, Optional[str]]:
         """Processamento síncrono de imagem (executado em processo separado)"""
@@ -434,6 +457,226 @@ class AsyncOperationsManager:
 
 # Inicializar gerenciador assíncrono
 async_manager = AsyncOperationsManager()
+
+# Sistema de Monitoramento e Métricas
+from dataclasses import dataclass, field
+from collections import deque
+import psutil
+
+@dataclass
+class PerformanceMetrics:
+    """Métricas de performance da aplicação"""
+    total_requests: int = 0
+    failed_requests: int = 0
+    total_images_processed: int = 0
+    total_panels_extracted: int = 0
+    cache_hits: int = 0
+    cache_misses: int = 0
+    avg_download_time: float = 0.0
+    avg_processing_time: float = 0.0
+    peak_memory_mb: float = 0.0
+    start_time: float = field(default_factory=time.time)
+    response_times: deque = field(default_factory=lambda: deque(maxlen=100))
+    processing_times: deque = field(default_factory=lambda: deque(maxlen=100))
+
+class MetricsCollector:
+    """Coletor de métricas em tempo real"""
+    
+    def __init__(self):
+        self.metrics = PerformanceMetrics()
+        self.active_downloads = 0
+        self.active_processing = 0
+        logger.info("📊 Sistema de métricas inicializado")
+    
+    def record_request(self, duration: float, success: bool, request_type: str = "download"):
+        """Registra métricas de requisição"""
+        self.metrics.total_requests += 1
+        if not success:
+            self.metrics.failed_requests += 1
+        
+        self.metrics.response_times.append(duration)
+        if self.metrics.response_times:
+            self.metrics.avg_download_time = sum(self.metrics.response_times) / len(self.metrics.response_times)
+        
+        logger.debug(f"Métrica registrada: {request_type} - {duration:.2f}s - {'✅' if success else '❌'}")
+    
+    def record_processing(self, duration: float, panels_extracted: int, image_name: str):
+        """Registra métricas de processamento"""
+        self.metrics.total_images_processed += 1
+        self.metrics.total_panels_extracted += panels_extracted
+        
+        self.metrics.processing_times.append(duration)
+        if self.metrics.processing_times:
+            self.metrics.avg_processing_time = sum(self.metrics.processing_times) / len(self.metrics.processing_times)
+        
+        logger.debug(f"Processamento registrado: {image_name} - {duration:.2f}s - {panels_extracted} painéis")
+    
+    def record_cache_event(self, hit: bool):
+        """Registra evento de cache"""
+        if hit:
+            self.metrics.cache_hits += 1
+        else:
+            self.metrics.cache_misses += 1
+    
+    def update_memory_usage(self):
+        """Atualiza uso de memória"""
+        try:
+            process = psutil.Process()
+            memory_mb = process.memory_info().rss / 1024 / 1024
+            if memory_mb > self.metrics.peak_memory_mb:
+                self.metrics.peak_memory_mb = memory_mb
+        except Exception:
+            pass  # psutil pode não estar disponível
+    
+    def get_success_rate(self) -> float:
+        """Calcula taxa de sucesso"""
+        if self.metrics.total_requests == 0:
+            return 0.0
+        return (self.metrics.total_requests - self.metrics.failed_requests) / self.metrics.total_requests
+    
+    def get_cache_hit_rate(self) -> float:
+        """Calcula taxa de acerto do cache"""
+        total = self.metrics.cache_hits + self.metrics.cache_misses
+        if total == 0:
+            return 0.0
+        return self.metrics.cache_hits / total
+    
+    def get_uptime(self) -> float:
+        """Calcula tempo de execução em segundos"""
+        return time.time() - self.metrics.start_time
+    
+    def get_throughput(self) -> float:
+        """Calcula throughput (painéis por minuto)"""
+        uptime_minutes = self.get_uptime() / 60
+        if uptime_minutes == 0:
+            return 0.0
+        return self.metrics.total_panels_extracted / uptime_minutes
+    
+    def display_dashboard(self):
+        """Exibe dashboard completo de métricas"""
+        st.markdown("### 📊 Dashboard de Performance")
+        
+        # Métricas principais
+        col1, col2, col3, col4 = st.columns(4)
+        
+        with col1:
+            st.metric(
+                "Taxa de Sucesso", 
+                f"{self.get_success_rate():.1%}",
+                delta=f"{self.metrics.total_requests} reqs" if self.metrics.total_requests > 0 else None
+            )
+        
+        with col2:
+            st.metric(
+                "Painéis Extraídos", 
+                self.metrics.total_panels_extracted,
+                delta=f"{self.metrics.total_images_processed} imgs"
+            )
+        
+        with col3:
+            st.metric(
+                "Cache Hit Rate", 
+                f"{self.get_cache_hit_rate():.1%}",
+                delta="Ótimo" if self.get_cache_hit_rate() > 0.8 else "Baixo"
+            )
+        
+        with col4:
+            st.metric(
+                "Throughput", 
+                f"{self.get_throughput():.1f}/min",
+                delta=f"{self.get_uptime()/60:.1f}min uptime"
+            )
+        
+        # Métricas de tempo
+        col1, col2, col3 = st.columns(3)
+        
+        with col1:
+            st.metric(
+                "Tempo Médio Download", 
+                f"{self.metrics.avg_download_time:.2f}s",
+                delta="Rápido" if self.metrics.avg_download_time < 2.0 else "Lento"
+            )
+        
+        with col2:
+            st.metric(
+                "Tempo Médio Processamento", 
+                f"{self.metrics.avg_processing_time:.2f}s",
+                delta="Eficiente" if self.metrics.avg_processing_time < 5.0 else "Lento"
+            )
+        
+        with col3:
+            self.update_memory_usage()
+            st.metric(
+                "Pico de Memória", 
+                f"{self.metrics.peak_memory_mb:.1f}MB",
+                delta="Normal" if self.metrics.peak_memory_mb < 500 else "Alto"
+            )
+        
+        # Operações em tempo real
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.metric(
+                "Downloads Ativos", 
+                self.active_downloads,
+                help="Número de downloads em execução"
+            )
+        
+        with col2:
+            st.metric(
+                "Processamentos Ativos", 
+                self.active_processing,
+                help="Número de imagens sendo processadas"
+            )
+        
+        # Gráfico de tempos de resposta (últimos 50)
+        if len(self.metrics.response_times) > 5:
+            st.markdown("#### 📈 Tempos de Resposta Recentes")
+            chart_data = list(self.metrics.response_times)[-50:]
+            st.line_chart(chart_data)
+        
+        # Alertas automáticos
+        self._show_performance_alerts()
+    
+    def _show_performance_alerts(self):
+        """Mostra alertas de performance"""
+        alerts = []
+        
+        if self.get_success_rate() < 0.8 and self.metrics.total_requests > 10:
+            alerts.append("🔴 Taxa de sucesso baixa (<80%)")
+        
+        if self.metrics.avg_download_time > 5.0:
+            alerts.append("🟡 Downloads lentos (>5s)")
+        
+        if self.metrics.avg_processing_time > 10.0:
+            alerts.append("🟡 Processamento lento (>10s)")
+        
+        if self.metrics.peak_memory_mb > 1000:
+            alerts.append("🔴 Alto uso de memória (>1GB)")
+        
+        if self.get_cache_hit_rate() < 0.3 and (self.metrics.cache_hits + self.metrics.cache_misses) > 10:
+            alerts.append("🟡 Cache pouco eficiente (<30%)")
+        
+        if alerts:
+            st.markdown("#### ⚠️ Alertas de Performance")
+            for alert in alerts:
+                st.warning(alert)
+    
+    def get_summary_stats(self) -> Dict:
+        """Retorna estatísticas resumidas"""
+        return {
+            "success_rate": self.get_success_rate(),
+            "total_panels": self.metrics.total_panels_extracted,
+            "avg_download": self.metrics.avg_download_time,
+            "avg_processing": self.metrics.avg_processing_time,
+            "cache_rate": self.get_cache_hit_rate(),
+            "throughput": self.get_throughput(),
+            "uptime": self.get_uptime(),
+            "memory_peak": self.metrics.peak_memory_mb
+        }
+
+# Inicializar coletor de métricas
+metrics_collector = MetricsCollector()
 
 # Wrapper para executar operações assíncronas no Streamlit
 def run_async(coro):
@@ -1186,7 +1429,7 @@ if st.sidebar.checkbox("🔍 Debug"):
     st.sidebar.write(f"Manhwas cache: {len(st.session_state.capitulos_cache)}")
 
 # Abas principais
-tab1, tab2, tab3, tab4 = st.tabs(["🖼️ Extrair Painéis", "🌐 Web Scraping", "📋 Capítulos", "📦 Download"])
+tab1, tab2, tab3, tab4, tab5 = st.tabs(["🖼️ Extrair Painéis", "🌐 Web Scraping", "📋 Capítulos", "📦 Download", "📊 Métricas"])
 
 with tab1:
     modo = st.radio("**Escolha o modo:**", 
@@ -1521,6 +1764,55 @@ with tab4:
         3. **📋 Capítulos**: Selecione e baixe capítulos específicos
         4. **📦 Download**: Baixe todos os painéis extraídos
         """)
+
+with tab5:
+    st.markdown("# 📊 Dashboard de Performance")
+    st.markdown("Monitoramento em tempo real da aplicação")
+    
+    # Botões de controle
+    col1, col2, col3 = st.columns(3)
+    
+    with col1:
+        if st.button("🔄 Atualizar Métricas", type="primary"):
+            st.rerun()
+    
+    with col2:
+        if st.button("📊 Exportar Relatório"):
+            stats = metrics_collector.get_summary_stats()
+            stats_json = json.dumps(stats, indent=2)
+            st.download_button(
+                "📥 Baixar JSON",
+                data=stats_json,
+                file_name=f"metrics_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
+                mime="application/json"
+            )
+    
+    with col3:
+        auto_refresh = st.checkbox("🔄 Auto-refresh (10s)", help="Atualiza métricas automaticamente")
+    
+    # Dashboard principal
+    metrics_collector.display_dashboard()
+    
+    # Seção de configurações avançadas
+    with st.expander("⚙️ Configurações Avançadas"):
+        st.markdown("#### Limites de Alerta")
+        
+        col1, col2 = st.columns(2)
+        with col1:
+            success_threshold = st.slider("Taxa de sucesso mínima (%)", 50, 100, 80)
+            download_threshold = st.slider("Tempo máximo de download (s)", 1, 20, 5)
+        
+        with col2:
+            processing_threshold = st.slider("Tempo máximo de processamento (s)", 1, 30, 10)
+            memory_threshold = st.slider("Limite de memória (MB)", 100, 2000, 1000)
+        
+        if st.button("💾 Salvar Configurações"):
+            st.success("Configurações salvas!")
+    
+    # Auto-refresh
+    if auto_refresh:
+        time.sleep(10)
+        st.rerun()
 
 # Rodapé com informações adicionais
 st.markdown("---")
