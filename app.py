@@ -485,6 +485,9 @@ class AsyncOperationsManager:
             self.process_pool.shutdown(wait=True)
             logger.info("Process pool encerrado")
 
+# Inicializar gerenciador de configuração primeiro (necessário para async_manager)
+config_manager = ConfigManager()
+
 # Inicializar gerenciador assíncrono
 async_manager = AsyncOperationsManager()
 
@@ -1651,9 +1654,6 @@ class ConfigManager:
                     self.reset_to_default()
                     st.success("Configuração resetada!")
                     st.rerun()
-
-# Inicializar gerenciador de configuração
-config_manager = ConfigManager()
 
 # Inicializar gerenciador de temas
 theme_manager = ThemeManager()
