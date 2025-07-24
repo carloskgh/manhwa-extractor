@@ -585,31 +585,31 @@ class MetricsCollector:
         col1, col2, col3, col4 = st.columns(4)
         
         with col1:
-            st.metric(
+            theme_manager.create_animated_metric(
                 "Taxa de Sucesso", 
                 f"{self.get_success_rate():.1%}",
-                delta=f"{self.metrics.total_requests} reqs" if self.metrics.total_requests > 0 else None
+                f"{self.metrics.total_requests} reqs" if self.metrics.total_requests > 0 else None
             )
         
         with col2:
-            st.metric(
+            theme_manager.create_animated_metric(
                 "Painéis Extraídos", 
-                self.metrics.total_panels_extracted,
-                delta=f"{self.metrics.total_images_processed} imgs"
+                str(self.metrics.total_panels_extracted),
+                f"{self.metrics.total_images_processed} imgs"
             )
         
         with col3:
-            st.metric(
+            theme_manager.create_animated_metric(
                 "Cache Hit Rate", 
                 f"{self.get_cache_hit_rate():.1%}",
-                delta="Ótimo" if self.get_cache_hit_rate() > 0.8 else "Baixo"
+                "Ótimo" if self.get_cache_hit_rate() > 0.8 else "Baixo"
             )
         
         with col4:
-            st.metric(
+            theme_manager.create_animated_metric(
                 "Throughput", 
                 f"{self.get_throughput():.1f}/min",
-                delta=f"{self.get_uptime()/60:.1f}min uptime"
+                f"{self.get_uptime()/60:.1f}min uptime"
             )
         
         # Métricas de tempo
@@ -1165,7 +1165,498 @@ def smart_sleep(duration: float = None, context: str = "general", url: str = Non
         time.sleep(duration)
 
 # Configuração da página
-st.set_page_config(page_title="Extrator de Painéis de Manhwa", layout="wide")
+st.set_page_config(
+    page_title="🖼️ Extrator de Painéis de Manhwa",
+    page_icon="🖼️",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
+
+# Sistema de Temas e Interface Otimizada
+class ThemeManager:
+    """Gerenciador de temas e interface otimizada"""
+    
+    def __init__(self):
+        self.themes = {
+            'dark': {
+                'name': '🌙 Tema Escuro',
+                'primary_color': '#FF4B4B',
+                'background_color': '#0E1117',
+                'secondary_background': '#262730',
+                'text_color': '#FAFAFA',
+                'accent_color': '#FF6B6B'
+            },
+            'light': {
+                'name': '☀️ Tema Claro', 
+                'primary_color': '#FF4B4B',
+                'background_color': '#FFFFFF',
+                'secondary_background': '#F0F2F6',
+                'text_color': '#262730',
+                'accent_color': '#FF6B6B'
+            },
+            'cyberpunk': {
+                'name': '🎮 Cyberpunk',
+                'primary_color': '#00FF41',
+                'background_color': '#000000',
+                'secondary_background': '#1A1A1A',
+                'text_color': '#00FF41',
+                'accent_color': '#FF0080'
+            },
+            'ocean': {
+                'name': '🌊 Oceano',
+                'primary_color': '#4FC3F7',
+                'background_color': '#0D47A1',
+                'secondary_background': '#1565C0',
+                'text_color': '#E3F2FD',
+                'accent_color': '#81C784'
+            }
+        }
+        self.current_theme = self._load_theme_preference()
+        logger.info(f"🎨 Gerenciador de temas inicializado - Tema: {self.current_theme}")
+    
+    def _load_theme_preference(self) -> str:
+        """Carrega preferência de tema do usuário"""
+        try:
+            if 'user_theme' not in st.session_state:
+                st.session_state.user_theme = 'dark'
+            return st.session_state.user_theme
+        except:
+            return 'dark'
+    
+    def _save_theme_preference(self, theme: str):
+        """Salva preferência de tema"""
+        st.session_state.user_theme = theme
+        self.current_theme = theme
+    
+    def apply_custom_css(self):
+        """Aplica CSS customizado baseado no tema"""
+        theme = self.themes[self.current_theme]
+        
+        css = f"""
+        <style>
+        /* Animações e transições */
+        .element-container {{
+            transition: all 0.3s ease-in-out;
+        }}
+        
+        .stButton > button {{
+            transition: all 0.2s ease-in-out;
+            border-radius: 10px;
+            border: 2px solid {theme['primary_color']};
+            background: linear-gradient(45deg, {theme['primary_color']}, {theme['accent_color']});
+            box-shadow: 0 4px 15px rgba(255, 75, 75, 0.3);
+        }}
+        
+        .stButton > button:hover {{
+            transform: translateY(-2px);
+            box-shadow: 0 8px 25px rgba(255, 75, 75, 0.4);
+            scale: 1.05;
+        }}
+        
+        .stButton > button:active {{
+            transform: translateY(0px);
+            scale: 0.98;
+        }}
+        
+        /* Métricas animadas */
+        .metric-card {{
+            background: linear-gradient(135deg, {theme['secondary_background']}, {theme['background_color']});
+            padding: 1rem;
+            border-radius: 15px;
+            border: 1px solid {theme['primary_color']}40;
+            box-shadow: 0 4px 20px rgba(0,0,0,0.1);
+            transition: all 0.3s ease;
+        }}
+        
+        .metric-card:hover {{
+            transform: translateY(-5px);
+            box-shadow: 0 8px 30px rgba(0,0,0,0.15);
+            border-color: {theme['primary_color']};
+        }}
+        
+        /* Progress bars animadas */
+        .stProgress > div > div > div {{
+            background: linear-gradient(45deg, {theme['primary_color']}, {theme['accent_color']});
+            border-radius: 10px;
+            animation: pulse 2s infinite;
+        }}
+        
+        @keyframes pulse {{
+            0% {{ opacity: 0.8; }}
+            50% {{ opacity: 1; }}
+            100% {{ opacity: 0.8; }}
+        }}
+        
+        /* Alertas estilizados */
+        .stAlert {{
+            border-radius: 12px;
+            border-left: 5px solid {theme['primary_color']};
+            animation: slideIn 0.5s ease-out;
+        }}
+        
+        @keyframes slideIn {{
+            from {{ transform: translateX(-100%); opacity: 0; }}
+            to {{ transform: translateX(0); opacity: 1; }}
+        }}
+        
+        /* Badges de status */
+        .status-badge {{
+            display: inline-block;
+            padding: 0.3rem 0.8rem;
+            border-radius: 20px;
+            font-size: 0.8rem;
+            font-weight: bold;
+            animation: glow 2s ease-in-out infinite alternate;
+        }}
+        
+        .status-online {{
+            background: linear-gradient(45deg, #4CAF50, #8BC34A);
+            color: white;
+            box-shadow: 0 0 10px #4CAF5050;
+        }}
+        
+        .status-warning {{
+            background: linear-gradient(45deg, #FF9800, #FFC107);
+            color: white;
+            box-shadow: 0 0 10px #FF980050;
+        }}
+        
+        .status-error {{
+            background: linear-gradient(45deg, #F44336, #E91E63);
+            color: white;
+            box-shadow: 0 0 10px #F4433650;
+        }}
+        
+        @keyframes glow {{
+            from {{ box-shadow: 0 0 5px currentColor; }}
+            to {{ box-shadow: 0 0 20px currentColor, 0 0 30px currentColor; }}
+        }}
+        
+        /* Loading spinner customizado */
+        .loading-spinner {{
+            display: inline-block;
+            width: 20px;
+            height: 20px;
+            border: 3px solid {theme['primary_color']}30;
+            border-radius: 50%;
+            border-top-color: {theme['primary_color']};
+            animation: spin 1s ease-in-out infinite;
+        }}
+        
+        @keyframes spin {{
+            to {{ transform: rotate(360deg); }}
+        }}
+        
+        /* Cards de informação */
+        .info-card {{
+            background: linear-gradient(135deg, {theme['secondary_background']}, {theme['background_color']});
+            padding: 1.5rem;
+            border-radius: 15px;
+            border: 1px solid {theme['primary_color']}40;
+            margin: 1rem 0;
+            box-shadow: 0 6px 25px rgba(0,0,0,0.1);
+            transition: all 0.3s ease;
+        }}
+        
+        .info-card:hover {{
+            transform: translateY(-3px);
+            box-shadow: 0 10px 35px rgba(0,0,0,0.15);
+            border-color: {theme['primary_color']};
+        }}
+        </style>
+        """
+        
+        st.markdown(css, unsafe_allow_html=True)
+    
+    def render_theme_selector(self):
+        """Renderiza seletor de tema na sidebar"""
+        st.sidebar.markdown("### 🎨 Personalização")
+        
+        theme_names = [self.themes[key]['name'] for key in self.themes.keys()]
+        theme_keys = list(self.themes.keys())
+        
+        current_index = theme_keys.index(self.current_theme)
+        
+        selected_theme = st.sidebar.selectbox(
+            "Escolha o tema:",
+            options=theme_names,
+            index=current_index,
+            help="Selecione um tema para personalizar a interface"
+        )
+        
+        # Encontrar a chave do tema selecionado
+        selected_key = None
+        for key, theme in self.themes.items():
+            if theme['name'] == selected_theme:
+                selected_key = key
+                break
+        
+        if selected_key and selected_key != self.current_theme:
+            self._save_theme_preference(selected_key)
+            st.sidebar.success(f"Tema alterado para {selected_theme}!")
+            st.rerun()
+    
+    def create_animated_metric(self, label: str, value: str, delta: str = None):
+        """Cria métrica animada customizada"""
+        delta_color = "normal"
+        if delta:
+            if "Excelente" in delta or "Ótimo" in delta or "Rápido" in delta:
+                delta_color = "normal" 
+            elif "Baixo" in delta or "Lento" in delta:
+                delta_color = "inverse"
+        
+        st.markdown(f'''
+        <div class="metric-card">
+            <div style="font-size: 0.8rem; color: gray;">{label}</div>
+            <div style="font-size: 1.5rem; font-weight: bold; margin: 0.5rem 0;">{value}</div>
+            {f'<div style="font-size: 0.8rem; color: {"#00FF00" if delta_color == "normal" else "#FF6B6B"};">{delta}</div>' if delta else ''}
+        </div>
+        ''', unsafe_allow_html=True)
+    
+    def create_status_badge(self, text: str, status: str = "online"):
+        """Cria badge de status animado"""
+        return f'<span class="status-badge status-{status}">{text}</span>'
+    
+    def create_loading_spinner(self, text: str = "Carregando..."):
+        """Cria spinner de loading customizado"""
+        return f'''
+        <div style="display: flex; align-items: center; gap: 10px;">
+            <div class="loading-spinner"></div>
+            <span>{text}</span>
+        </div>
+        '''
+
+# Sistema de Configuração Externa
+class ConfigManager:
+    """Gerenciador de configurações externas"""
+    
+    def __init__(self, config_file: str = "config.json"):
+        self.config_file = config_file
+        self.default_config = {
+            "app": {
+                "name": "Extrator de Painéis de Manhwa",
+                "version": "2.0.0",
+                "debug": False,
+                "max_upload_size_mb": 50,
+                "supported_formats": ["jpg", "jpeg", "png", "webp"]
+            },
+            "yolo": {
+                "model_name": "yolov8n.pt",
+                "confidence_threshold": 0.25,
+                "device": "cpu",
+                "max_det": 300
+            },
+            "opencv": {
+                "max_width": 1024,
+                "min_contour_size": 100,
+                "blur_threshold": 100,
+                "area_threshold": 1000
+            },
+            "scraping": {
+                "request_timeout": 15,
+                "max_retries": 3,
+                "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                "max_workers": 4
+            },
+            "rate_limits": {
+                "manhwatop.com": {"requests": 5, "window": 60},
+                "reaperscans.com": {"requests": 3, "window": 60},
+                "asurascans.com": {"requests": 4, "window": 60},
+                "mangadex.org": {"requests": 8, "window": 60},
+                "default": {"requests": 10, "window": 60}
+            },
+            "cache": {
+                "max_memory_mb": 200,
+                "ttl": {
+                    "image": 86400,
+                    "webpage": 21600,
+                    "chapter_list": 43200,
+                    "processed_image": 604800,
+                    "default": 7200
+                }
+            },
+            "logging": {
+                "level": "INFO",
+                "file_rotation": True,
+                "max_file_size_mb": 10,
+                "backup_count": 5
+            },
+            "ui": {
+                "theme": "dark",
+                "sidebar_state": "expanded",
+                "show_debug": False,
+                "auto_refresh_metrics": True,
+                "metrics_refresh_interval": 10
+            },
+            "alerts": {
+                "success_rate_threshold": 80,
+                "memory_threshold_gb": 1.0,
+                "response_time_threshold_ms": 5000,
+                "enable_notifications": True
+            }
+        }
+        self.config = self._load_config()
+        self._apply_env_overrides()
+        logger.info(f"⚙️ Configuração carregada - Arquivo: {config_file}")
+    
+    def _load_config(self) -> dict:
+        """Carrega configuração do arquivo ou cria padrão"""
+        try:
+            if os.path.exists(self.config_file):
+                with open(self.config_file, 'r', encoding='utf-8') as f:
+                    loaded_config = json.load(f)
+                    # Merge com configuração padrão para ter todas as chaves
+                    return self._deep_merge(self.default_config, loaded_config)
+            else:
+                # Criar arquivo de configuração padrão
+                self.save_config(self.default_config)
+                return self.default_config.copy()
+        except Exception as e:
+            logger.warning(f"Erro ao carregar configuração: {e}, usando padrão")
+            return self.default_config.copy()
+    
+    def _deep_merge(self, base: dict, override: dict) -> dict:
+        """Merge profundo de dicionários"""
+        result = base.copy()
+        for key, value in override.items():
+            if key in result and isinstance(result[key], dict) and isinstance(value, dict):
+                result[key] = self._deep_merge(result[key], value)
+            else:
+                result[key] = value
+        return result
+    
+    def _apply_env_overrides(self):
+        """Aplica overrides de variáveis de ambiente"""
+        env_mappings = {
+            'MANHWA_DEBUG': ('app', 'debug'),
+            'MANHWA_LOG_LEVEL': ('logging', 'level'),
+            'MANHWA_THEME': ('ui', 'theme'),
+            'MANHWA_CACHE_SIZE': ('cache', 'max_memory_mb'),
+            'MANHWA_MAX_WORKERS': ('scraping', 'max_workers'),
+            'MANHWA_REQUEST_TIMEOUT': ('scraping', 'request_timeout')
+        }
+        
+        for env_var, (section, key) in env_mappings.items():
+            value = os.getenv(env_var)
+            if value:
+                try:
+                    # Tentar converter tipos apropriados
+                    if key in ['debug', 'file_rotation', 'show_debug', 'auto_refresh_metrics', 'enable_notifications']:
+                        value = value.lower() in ('true', '1', 'yes', 'on')
+                    elif key in ['max_memory_mb', 'max_workers', 'request_timeout', 'metrics_refresh_interval']:
+                        value = int(value)
+                    elif key in ['memory_threshold_gb']:
+                        value = float(value)
+                    
+                    self.config[section][key] = value
+                    logger.info(f"Override de env aplicado: {env_var} = {value}")
+                except Exception as e:
+                    logger.warning(f"Erro ao aplicar override {env_var}: {e}")
+    
+    def get(self, section: str, key: str = None, default=None):
+        """Obtém valor de configuração"""
+        try:
+            if key is None:
+                return self.config.get(section, default)
+            return self.config.get(section, {}).get(key, default)
+        except Exception:
+            return default
+    
+    def set(self, section: str, key: str, value):
+        """Define valor de configuração"""
+        if section not in self.config:
+            self.config[section] = {}
+        self.config[section][key] = value
+    
+    def save_config(self, config: dict = None):
+        """Salva configuração no arquivo"""
+        try:
+            config_to_save = config or self.config
+            with open(self.config_file, 'w', encoding='utf-8') as f:
+                json.dump(config_to_save, f, indent=2, ensure_ascii=False)
+            logger.info(f"Configuração salva em {self.config_file}")
+        except Exception as e:
+            logger.error(f"Erro ao salvar configuração: {e}")
+    
+    def reset_to_default(self):
+        """Restaura configuração padrão"""
+        self.config = self.default_config.copy()
+        self.save_config()
+        logger.info("Configuração restaurada para padrão")
+    
+    def export_config(self) -> str:
+        """Exporta configuração como JSON string"""
+        return json.dumps(self.config, indent=2, ensure_ascii=False)
+    
+    def render_config_editor(self):
+        """Renderiza editor de configuração na interface"""
+        st.markdown("### ⚙️ Editor de Configuração")
+        
+        # Tabs para diferentes seções
+        sections = list(self.config.keys())
+        selected_section = st.selectbox("Seção:", sections)
+        
+        if selected_section:
+            st.markdown(f"#### 📋 {selected_section.title()}")
+            
+            section_config = self.config[selected_section]
+            updated = False
+            
+            for key, value in section_config.items():
+                col1, col2 = st.columns([1, 2])
+                
+                with col1:
+                    st.markdown(f"**{key}:**")
+                
+                with col2:
+                    if isinstance(value, bool):
+                        new_value = st.checkbox(f"", value=value, key=f"{selected_section}_{key}")
+                    elif isinstance(value, int):
+                        new_value = st.number_input(f"", value=value, key=f"{selected_section}_{key}")
+                    elif isinstance(value, float):
+                        new_value = st.number_input(f"", value=value, format="%.2f", key=f"{selected_section}_{key}")
+                    elif isinstance(value, dict):
+                        new_value = st.text_area(f"", value=json.dumps(value, indent=2), key=f"{selected_section}_{key}")
+                        try:
+                            new_value = json.loads(new_value)
+                        except:
+                            st.error("JSON inválido")
+                            new_value = value
+                    else:
+                        new_value = st.text_input(f"", value=str(value), key=f"{selected_section}_{key}")
+                    
+                    if new_value != value:
+                        self.config[selected_section][key] = new_value
+                        updated = True
+            
+            # Botões de controle
+            col1, col2, col3 = st.columns(3)
+            
+            with col1:
+                if st.button("💾 Salvar Alterações"):
+                    self.save_config()
+                    st.success("Configuração salva!")
+                    st.rerun()
+            
+            with col2:
+                if st.button("📤 Exportar JSON"):
+                    st.text_area("Configuração JSON:", self.export_config(), height=300)
+            
+            with col3:
+                if st.button("🔄 Resetar Padrão"):
+                    self.reset_to_default()
+                    st.success("Configuração resetada!")
+                    st.rerun()
+
+# Inicializar gerenciador de configuração
+config_manager = ConfigManager()
+
+# Inicializar gerenciador de temas
+theme_manager = ThemeManager()
+
+# Aplicar tema e CSS customizado
+theme_manager.apply_custom_css()
+
 st.title("🖼️ Extrator de Painéis de Manhwa")
 st.markdown('<div id="topo"></div>', unsafe_allow_html=True)
 
@@ -1801,11 +2292,13 @@ if rate_limiter.requests:
             else:
                 status = "🟢"  # Ok
             
-            st.sidebar.metric(
-                f"{status} {domain}",
-                f"{recent_requests}/{limit}",
-                help=f"Requisições na última hora"
+            # Criar badge animado
+            badge_status = "error" if recent_requests >= limit * 0.8 else ("warning" if recent_requests >= limit * 0.5 else "online")
+            badge_html = theme_manager.create_status_badge(
+                f"{domain}: {recent_requests}/{limit}",
+                badge_status
             )
+            st.sidebar.markdown(f"{status} {badge_html}", unsafe_allow_html=True)
 else:
     st.sidebar.info("🟢 Nenhuma requisição recente")
 
@@ -1855,6 +2348,9 @@ if cache_stats['total_items'] > 0:
 else:
     st.sidebar.info("📭 Cache vazio")
 
+# Seletor de temas
+theme_manager.render_theme_selector()
+
 # Debug info
 if st.sidebar.checkbox("🔍 Debug"):
     st.sidebar.write(f"Painéis únicos: {len(st.session_state.paineis_processados)}")
@@ -1862,7 +2358,7 @@ if st.sidebar.checkbox("🔍 Debug"):
     st.sidebar.write(f"Manhwas cache: {len(st.session_state.capitulos_cache)}")
 
 # Abas principais
-tab1, tab2, tab3, tab4, tab5 = st.tabs(["🖼️ Extrair Painéis", "🌐 Web Scraping", "📋 Capítulos", "📦 Download", "📊 Métricas"])
+tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["🖼️ Extrair Painéis", "🌐 Web Scraping", "📋 Capítulos", "📦 Download", "📊 Métricas", "⚙️ Configurações"])
 
 with tab1:
     modo = st.radio("**Escolha o modo:**", 
@@ -2249,6 +2745,135 @@ with tab5:
     if auto_refresh:
         time.sleep(10)
         st.rerun()
+
+with tab6:
+    st.markdown("# ⚙️ Configurações do Sistema")
+    
+    st.markdown("""
+    <div class="info-card">
+        <h3>🎛️ Painel de Configuração</h3>
+        <p>Configure todos os aspectos da aplicação através desta interface intuitiva. 
+        As configurações são salvas automaticamente e persistem entre sessões.</p>
+    </div>
+    """, unsafe_allow_html=True)
+    
+    # Editor de configuração
+    config_manager.render_config_editor()
+    
+    st.markdown("---")
+    
+    # Seção de variáveis de ambiente
+    st.markdown("### 🌍 Variáveis de Ambiente")
+    st.markdown("""
+    Você pode configurar a aplicação usando variáveis de ambiente:
+    
+    - `MANHWA_DEBUG=true` - Ativa modo debug
+    - `MANHWA_LOG_LEVEL=DEBUG` - Define nível de log  
+    - `MANHWA_THEME=cyberpunk` - Define tema padrão
+    - `MANHWA_CACHE_SIZE=500` - Tamanho do cache (MB)
+    - `MANHWA_MAX_WORKERS=8` - Número de workers
+    - `MANHWA_REQUEST_TIMEOUT=30` - Timeout de requisições
+    """)
+    
+    # Informações do sistema
+    st.markdown("### 💻 Informações do Sistema")
+    
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        st.markdown(f"""
+        **Aplicação:**
+        - Nome: {config_manager.get('app', 'name')}
+        - Versão: {config_manager.get('app', 'version')}
+        - Debug: {config_manager.get('app', 'debug')}
+        
+        **Cache:**
+        - Tamanho máximo: {config_manager.get('cache', 'max_memory_mb')}MB
+        - TTL imagens: {config_manager.get('cache', 'ttl', {}).get('image', 0)}s
+        """)
+    
+    with col2:
+        st.markdown(f"""
+        **Scraping:**
+        - Timeout: {config_manager.get('scraping', 'request_timeout')}s
+        - Max workers: {config_manager.get('scraping', 'max_workers')}
+        - User agent: {config_manager.get('scraping', 'user_agent', 'N/A')[:50]}...
+        
+        **Alertas:**
+        - Taxa sucesso min: {config_manager.get('alerts', 'success_rate_threshold')}%
+        - Limite memória: {config_manager.get('alerts', 'memory_threshold_gb')}GB
+        """)
+    
+    # Backup e restauração
+    st.markdown("### 💾 Backup e Restauração")
+    
+    col1, col2, col3 = st.columns(3)
+    
+    with col1:
+        if st.button("📥 Backup Configuração"):
+            backup_data = {
+                "timestamp": datetime.now().isoformat(),
+                "config": config_manager.config,
+                "version": config_manager.get('app', 'version')
+            }
+            
+            st.download_button(
+                "💾 Download Backup",
+                json.dumps(backup_data, indent=2, ensure_ascii=False),
+                file_name=f"manhwa_config_backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
+                mime="application/json"
+            )
+    
+    with col2:
+        uploaded_config = st.file_uploader(
+            "📤 Restaurar Configuração",
+            type=['json'],
+            help="Faça upload de um arquivo de backup de configuração"
+        )
+        
+        if uploaded_config:
+            try:
+                backup_data = json.load(uploaded_config)
+                if 'config' in backup_data:
+                    config_manager.config = backup_data['config']
+                    config_manager.save_config()
+                    st.success("✅ Configuração restaurada com sucesso!")
+                    st.rerun()
+                else:
+                    st.error("❌ Arquivo de backup inválido")
+            except Exception as e:
+                st.error(f"❌ Erro ao restaurar: {e}")
+    
+    with col3:
+        if st.button("🔄 Resetar Tudo"):
+            if st.checkbox("⚠️ Confirmar reset completo"):
+                config_manager.reset_to_default()
+                # Limpar cache também
+                intelligent_cache.clear_all()
+                st.success("✅ Sistema resetado para padrão!")
+                st.rerun()
+    
+    # Status das configurações
+    st.markdown("### 📊 Status das Configurações")
+    
+    config_status = {
+        "Arquivo de config": "✅ Carregado" if os.path.exists("config.json") else "❌ Não encontrado",
+        "Logs habilitados": "✅ Sim" if config_manager.get('logging', 'level') != 'DISABLED' else "❌ Não",
+        "Cache ativo": "✅ Sim" if config_manager.get('cache', 'max_memory_mb', 0) > 0 else "❌ Não",
+        "Rate limiting": "✅ Ativo" if config_manager.get('rate_limits') else "❌ Inativo",
+        "Tema customizado": "✅ Sim" if config_manager.get('ui', 'theme') != 'default' else "❌ Padrão"
+    }
+    
+    for item, status in config_status.items():
+        st.markdown(f"- **{item}**: {status}")
+    
+    st.markdown("---")
+    st.markdown("""
+    <div style="text-align: center; padding: 2rem; background: linear-gradient(90deg, #FF4B4B, #FF6B6B); 
+                -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text; font-weight: bold;">
+        🚀 Configuração Profissional • Sistema Enterprise-Ready • Manhwa Extractor v2.0
+    </div>
+    """, unsafe_allow_html=True)
 
 # Rodapé com informações adicionais
 st.markdown("---")
