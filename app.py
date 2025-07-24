@@ -69,24 +69,13 @@ SCRAPING_HEADERS = {
 }
 
 # Carregamento do modelo otimizado
-@st.cache_resource
-def carregar_modelo():
-    try:
-        modelo = YOLO("best.pt")
-        modelo.overrides['verbose'] = False
-        modelo.overrides['device'] = 'cpu'
-        
-        dummy_test = np.zeros((64, 64, 3), dtype=np.uint8)
-        modelo(dummy_test, verbose=False)
-        return modelo
-    except FileNotFoundError:
-        st.error("❌ Arquivo 'best.pt' não encontrado. Usando apenas detecção por contorno.")
-        return None
-    except Exception as e:
-        st.error(f"❌ Erro ao carregar modelo: {e}")
-        st.info("💡 Usando apenas detecção por contorno...")
-        return None
+# URL do modelo no Dropbox
+URL_MODELO_DROPBOX = "https://www.dropbox.com/scl/fi/a743aqjqzau3fxy4fss4a/best.pt?rlkey=a24lozm0cw8znku0h743ylx2z&dl=0"
 
+# Baixar automaticamente se necessário
+baixar_modelo_yolo(URL_MODELO_DROPBOX)
+
+# Carregar modelo normalmente
 model = carregar_modelo()
 
 # Inicialização do estado da sessão
