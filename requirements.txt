@@ -5,3 +5,4 @@ ultralytics
 numpy
 requests
 beautifulsoup4
+opencv-python-headless
