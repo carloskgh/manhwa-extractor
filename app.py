@@ -75,11 +75,11 @@ URL_MODELO_DROPBOX = "https://www.dropbox.com/scl/fi/a743aqjqzau3fxy4fss4a/best.
 baixar_modelo_yolo(URL_MODELO_DROPBOX)
 
 # Carregar modelo normalmente
-model = carregar_modelo(best.pt)
+model = carregar_modelo("best.pt")
 
 # Carregamento do modelo otimizado
 @st.cache_resource
-def carregar_modelo(best.pt):
+def carregar_modelo("best.pt"):
     try:
         modelo = YOLO("best.pt")
         modelo.overrides['verbose'] = False
@@ -96,7 +96,7 @@ def carregar_modelo(best.pt):
         st.info("💡 Usando apenas detecção por contorno...")
         return None
 
-model = carregar_modelo(best.pt)
+model = carregar_modelo("best.pt")
 
 # Inicialização do estado da sessão
 def init_session_state():
