@@ -711,7 +711,6 @@ metrics_collector = MetricsCollector()
 # Sistema de Cache Inteligente
 from pathlib import Path
 import pickle
-import hashlib
 from typing import Any
 
 class IntelligentCache:
