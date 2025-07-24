@@ -1,0 +1,43 @@
+{
+  "logging": {
+    "version": 1,
+    "disable_existing_loggers": false,
+    "formatters": {
+      "detailed": {
+        "format": "%(asctime)s - %(name)s - %(levelname)s - %(funcName)s:%(lineno)d - %(message)s",
+        "datefmt": "%Y-%m-%d %H:%M:%S"
+      },
+      "simple": {
+        "format": "%(levelname)s - %(message)s"
+      }
+    },
+    "handlers": {
+      "file": {
+        "class": "logging.handlers.RotatingFileHandler",
+        "level": "INFO",
+        "formatter": "detailed",
+        "filename": "logs/manhwa_extractor.log",
+        "maxBytes": 10485760,
+        "backupCount": 5,
+        "encoding": "utf8"
+      },
+      "console": {
+        "class": "logging.StreamHandler",
+        "level": "INFO",
+        "formatter": "simple",
+        "stream": "ext://sys.stdout"
+      }
+    },
+    "loggers": {
+      "__main__": {
+        "level": "INFO",
+        "handlers": ["file", "console"],
+        "propagate": false
+      }
+    },
+    "root": {
+      "level": "INFO",
+      "handlers": ["file", "console"]
+    }
+  }
+}
