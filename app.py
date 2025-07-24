@@ -485,6 +485,228 @@ class AsyncOperationsManager:
             self.process_pool.shutdown(wait=True)
             logger.info("Process pool encerrado")
 
+# Sistema de Configuração Externa (MOVIDO PARA CÁ)
+class ConfigManager:
+    """Gerenciador de configurações externas"""
+    
+    def __init__(self, config_file: str = "config.json"):
+        self.config_file = config_file
+        self.default_config = {
+            "app": {
+                "name": "Extrator de Painéis de Manhwa",
+                "version": "2.0.0",
+                "debug": False,
+                "max_upload_size_mb": 50,
+                "supported_formats": ["jpg", "jpeg", "png", "webp"]
+            },
+            "yolo": {
+                "model_name": "yolov8n.pt",
+                "confidence_threshold": 0.25,
+                "device": "cpu",
+                "max_det": 300
+            },
+            "opencv": {
+                "max_width": 1024,
+                "min_contour_size": 100,
+                "blur_threshold": 100,
+                "area_threshold": 1000
+            },
+            "scraping": {
+                "request_timeout": 15,
+                "max_retries": 3,
+                "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                "max_workers": 4
+            },
+            "rate_limits": {
+                "manhwatop.com": {"requests": 5, "window": 60},
+                "reaperscans.com": {"requests": 3, "window": 60},
+                "asurascans.com": {"requests": 4, "window": 60},
+                "mangadex.org": {"requests": 8, "window": 60},
+                "default": {"requests": 10, "window": 60}
+            },
+            "cache": {
+                "max_memory_mb": 200,
+                "ttl": {
+                    "image": 86400,
+                    "webpage": 21600,
+                    "chapter_list": 43200,
+                    "processed_image": 604800,
+                    "default": 7200
+                }
+            },
+            "logging": {
+                "level": "INFO",
+                "file_rotation": True,
+                "max_file_size_mb": 10,
+                "backup_count": 5
+            },
+            "ui": {
+                "theme": "dark",
+                "sidebar_state": "expanded",
+                "show_debug": False,
+                "auto_refresh_metrics": True,
+                "metrics_refresh_interval": 10
+            },
+            "alerts": {
+                "success_rate_threshold": 80,
+                "memory_threshold_gb": 1.0,
+                "response_time_threshold_ms": 5000,
+                "enable_notifications": True
+            }
+        }
+        self.config = self._load_config()
+        self._apply_env_overrides()
+        logger.info(f"⚙️ Configuração carregada - Arquivo: {config_file}")
+    
+    def _load_config(self) -> dict:
+        """Carrega configuração do arquivo ou cria padrão"""
+        try:
+            if os.path.exists(self.config_file):
+                with open(self.config_file, 'r', encoding='utf-8') as f:
+                    loaded_config = json.load(f)
+                    # Merge com configuração padrão para ter todas as chaves
+                    return self._deep_merge(self.default_config, loaded_config)
+            else:
+                # Criar arquivo de configuração padrão
+                self.save_config(self.default_config)
+                return self.default_config.copy()
+        except Exception as e:
+            logger.warning(f"Erro ao carregar configuração: {e}, usando padrão")
+            return self.default_config.copy()
+    
+    def _deep_merge(self, base: dict, override: dict) -> dict:
+        """Merge profundo de dicionários"""
+        result = base.copy()
+        for key, value in override.items():
+            if key in result and isinstance(result[key], dict) and isinstance(value, dict):
+                result[key] = self._deep_merge(result[key], value)
+            else:
+                result[key] = value
+        return result
+    
+    def _apply_env_overrides(self):
+        """Aplica overrides de variáveis de ambiente"""
+        env_mappings = {
+            'MANHWA_DEBUG': ('app', 'debug'),
+            'MANHWA_LOG_LEVEL': ('logging', 'level'),
+            'MANHWA_THEME': ('ui', 'theme'),
+            'MANHWA_CACHE_SIZE': ('cache', 'max_memory_mb'),
+            'MANHWA_MAX_WORKERS': ('scraping', 'max_workers'),
+            'MANHWA_REQUEST_TIMEOUT': ('scraping', 'request_timeout')
+        }
+        
+        for env_var, (section, key) in env_mappings.items():
+            value = os.getenv(env_var)
+            if value:
+                try:
+                    # Tentar converter tipos apropriados
+                    if key in ['debug', 'file_rotation', 'show_debug', 'auto_refresh_metrics', 'enable_notifications']:
+                        value = value.lower() in ('true', '1', 'yes', 'on')
+                    elif key in ['max_memory_mb', 'max_workers', 'request_timeout', 'metrics_refresh_interval']:
+                        value = int(value)
+                    elif key in ['memory_threshold_gb']:
+                        value = float(value)
+                    
+                    self.config[section][key] = value
+                    logger.info(f"Override de env aplicado: {env_var} = {value}")
+                except Exception as e:
+                    logger.warning(f"Erro ao aplicar override {env_var}: {e}")
+    
+    def get(self, section: str, key: str = None, default=None):
+        """Obtém valor de configuração"""
+        try:
+            if key is None:
+                return self.config.get(section, default)
+            return self.config.get(section, {}).get(key, default)
+        except Exception:
+            return default
+    
+    def set(self, section: str, key: str, value):
+        """Define valor de configuração"""
+        if section not in self.config:
+            self.config[section] = {}
+        self.config[section][key] = value
+    
+    def save_config(self, config: dict = None):
+        """Salva configuração no arquivo"""
+        try:
+            config_to_save = config or self.config
+            with open(self.config_file, 'w', encoding='utf-8') as f:
+                json.dump(config_to_save, f, indent=2, ensure_ascii=False)
+            logger.info(f"Configuração salva em {self.config_file}")
+        except Exception as e:
+            logger.error(f"Erro ao salvar configuração: {e}")
+    
+    def reset_to_default(self):
+        """Restaura configuração padrão"""
+        self.config = self.default_config.copy()
+        self.save_config()
+        logger.info("Configuração restaurada para padrão")
+    
+    def export_config(self) -> str:
+        """Exporta configuração como JSON string"""
+        return json.dumps(self.config, indent=2, ensure_ascii=False)
+    
+    def render_config_editor(self):
+        """Renderiza editor de configuração na interface"""
+        st.markdown("### ⚙️ Editor de Configuração")
+        
+        # Tabs para diferentes seções
+        sections = list(self.config.keys())
+        selected_section = st.selectbox("Seção:", sections)
+        
+        if selected_section:
+            st.markdown(f"#### 📋 {selected_section.title()}")
+            
+            section_config = self.config[selected_section]
+            updated = False
+            
+            for key, value in section_config.items():
+                col1, col2 = st.columns([1, 2])
+                
+                with col1:
+                    st.markdown(f"**{key}:**")
+                
+                with col2:
+                    if isinstance(value, bool):
+                        new_value = st.checkbox(f"", value=value, key=f"{selected_section}_{key}")
+                    elif isinstance(value, int):
+                        new_value = st.number_input(f"", value=value, key=f"{selected_section}_{key}")
+                    elif isinstance(value, float):
+                        new_value = st.number_input(f"", value=value, format="%.2f", key=f"{selected_section}_{key}")
+                    elif isinstance(value, dict):
+                        new_value = st.text_area(f"", value=json.dumps(value, indent=2), key=f"{selected_section}_{key}")
+                        try:
+                            new_value = json.loads(new_value)
+                        except:
+                            st.error("JSON inválido")
+                            new_value = value
+                    else:
+                        new_value = st.text_input(f"", value=str(value), key=f"{selected_section}_{key}")
+                    
+                    if new_value != value:
+                        self.config[selected_section][key] = new_value
+                        updated = True
+            
+            # Botões de controle
+            col1, col2, col3 = st.columns(3)
+            
+            with col1:
+                if st.button("💾 Salvar Alterações"):
+                    self.save_config()
+                    st.success("Configuração salva!")
+                    st.rerun()
+            
+            with col2:
+                if st.button("📤 Exportar JSON"):
+                    st.text_area("Configuração JSON:", self.export_config(), height=300)
+            
+            with col3:
+                if st.button("🔄 Resetar Padrão"):
+                    self.reset_to_default()
+                    st.success("Configuração resetada!")
+                    st.rerun()
+
 # Inicializar gerenciador de configuração primeiro (necessário para async_manager)
 config_manager = ConfigManager()
 
@@ -1433,227 +1655,7 @@ class ThemeManager:
         </div>
         '''
 
-# Sistema de Configuração Externa
-class ConfigManager:
-    """Gerenciador de configurações externas"""
-    
-    def __init__(self, config_file: str = "config.json"):
-        self.config_file = config_file
-        self.default_config = {
-            "app": {
-                "name": "Extrator de Painéis de Manhwa",
-                "version": "2.0.0",
-                "debug": False,
-                "max_upload_size_mb": 50,
-                "supported_formats": ["jpg", "jpeg", "png", "webp"]
-            },
-            "yolo": {
-                "model_name": "yolov8n.pt",
-                "confidence_threshold": 0.25,
-                "device": "cpu",
-                "max_det": 300
-            },
-            "opencv": {
-                "max_width": 1024,
-                "min_contour_size": 100,
-                "blur_threshold": 100,
-                "area_threshold": 1000
-            },
-            "scraping": {
-                "request_timeout": 15,
-                "max_retries": 3,
-                "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-                "max_workers": 4
-            },
-            "rate_limits": {
-                "manhwatop.com": {"requests": 5, "window": 60},
-                "reaperscans.com": {"requests": 3, "window": 60},
-                "asurascans.com": {"requests": 4, "window": 60},
-                "mangadex.org": {"requests": 8, "window": 60},
-                "default": {"requests": 10, "window": 60}
-            },
-            "cache": {
-                "max_memory_mb": 200,
-                "ttl": {
-                    "image": 86400,
-                    "webpage": 21600,
-                    "chapter_list": 43200,
-                    "processed_image": 604800,
-                    "default": 7200
-                }
-            },
-            "logging": {
-                "level": "INFO",
-                "file_rotation": True,
-                "max_file_size_mb": 10,
-                "backup_count": 5
-            },
-            "ui": {
-                "theme": "dark",
-                "sidebar_state": "expanded",
-                "show_debug": False,
-                "auto_refresh_metrics": True,
-                "metrics_refresh_interval": 10
-            },
-            "alerts": {
-                "success_rate_threshold": 80,
-                "memory_threshold_gb": 1.0,
-                "response_time_threshold_ms": 5000,
-                "enable_notifications": True
-            }
-        }
-        self.config = self._load_config()
-        self._apply_env_overrides()
-        logger.info(f"⚙️ Configuração carregada - Arquivo: {config_file}")
-    
-    def _load_config(self) -> dict:
-        """Carrega configuração do arquivo ou cria padrão"""
-        try:
-            if os.path.exists(self.config_file):
-                with open(self.config_file, 'r', encoding='utf-8') as f:
-                    loaded_config = json.load(f)
-                    # Merge com configuração padrão para ter todas as chaves
-                    return self._deep_merge(self.default_config, loaded_config)
-            else:
-                # Criar arquivo de configuração padrão
-                self.save_config(self.default_config)
-                return self.default_config.copy()
-        except Exception as e:
-            logger.warning(f"Erro ao carregar configuração: {e}, usando padrão")
-            return self.default_config.copy()
-    
-    def _deep_merge(self, base: dict, override: dict) -> dict:
-        """Merge profundo de dicionários"""
-        result = base.copy()
-        for key, value in override.items():
-            if key in result and isinstance(result[key], dict) and isinstance(value, dict):
-                result[key] = self._deep_merge(result[key], value)
-            else:
-                result[key] = value
-        return result
-    
-    def _apply_env_overrides(self):
-        """Aplica overrides de variáveis de ambiente"""
-        env_mappings = {
-            'MANHWA_DEBUG': ('app', 'debug'),
-            'MANHWA_LOG_LEVEL': ('logging', 'level'),
-            'MANHWA_THEME': ('ui', 'theme'),
-            'MANHWA_CACHE_SIZE': ('cache', 'max_memory_mb'),
-            'MANHWA_MAX_WORKERS': ('scraping', 'max_workers'),
-            'MANHWA_REQUEST_TIMEOUT': ('scraping', 'request_timeout')
-        }
-        
-        for env_var, (section, key) in env_mappings.items():
-            value = os.getenv(env_var)
-            if value:
-                try:
-                    # Tentar converter tipos apropriados
-                    if key in ['debug', 'file_rotation', 'show_debug', 'auto_refresh_metrics', 'enable_notifications']:
-                        value = value.lower() in ('true', '1', 'yes', 'on')
-                    elif key in ['max_memory_mb', 'max_workers', 'request_timeout', 'metrics_refresh_interval']:
-                        value = int(value)
-                    elif key in ['memory_threshold_gb']:
-                        value = float(value)
-                    
-                    self.config[section][key] = value
-                    logger.info(f"Override de env aplicado: {env_var} = {value}")
-                except Exception as e:
-                    logger.warning(f"Erro ao aplicar override {env_var}: {e}")
-    
-    def get(self, section: str, key: str = None, default=None):
-        """Obtém valor de configuração"""
-        try:
-            if key is None:
-                return self.config.get(section, default)
-            return self.config.get(section, {}).get(key, default)
-        except Exception:
-            return default
-    
-    def set(self, section: str, key: str, value):
-        """Define valor de configuração"""
-        if section not in self.config:
-            self.config[section] = {}
-        self.config[section][key] = value
-    
-    def save_config(self, config: dict = None):
-        """Salva configuração no arquivo"""
-        try:
-            config_to_save = config or self.config
-            with open(self.config_file, 'w', encoding='utf-8') as f:
-                json.dump(config_to_save, f, indent=2, ensure_ascii=False)
-            logger.info(f"Configuração salva em {self.config_file}")
-        except Exception as e:
-            logger.error(f"Erro ao salvar configuração: {e}")
-    
-    def reset_to_default(self):
-        """Restaura configuração padrão"""
-        self.config = self.default_config.copy()
-        self.save_config()
-        logger.info("Configuração restaurada para padrão")
-    
-    def export_config(self) -> str:
-        """Exporta configuração como JSON string"""
-        return json.dumps(self.config, indent=2, ensure_ascii=False)
-    
-    def render_config_editor(self):
-        """Renderiza editor de configuração na interface"""
-        st.markdown("### ⚙️ Editor de Configuração")
-        
-        # Tabs para diferentes seções
-        sections = list(self.config.keys())
-        selected_section = st.selectbox("Seção:", sections)
-        
-        if selected_section:
-            st.markdown(f"#### 📋 {selected_section.title()}")
-            
-            section_config = self.config[selected_section]
-            updated = False
-            
-            for key, value in section_config.items():
-                col1, col2 = st.columns([1, 2])
-                
-                with col1:
-                    st.markdown(f"**{key}:**")
-                
-                with col2:
-                    if isinstance(value, bool):
-                        new_value = st.checkbox(f"", value=value, key=f"{selected_section}_{key}")
-                    elif isinstance(value, int):
-                        new_value = st.number_input(f"", value=value, key=f"{selected_section}_{key}")
-                    elif isinstance(value, float):
-                        new_value = st.number_input(f"", value=value, format="%.2f", key=f"{selected_section}_{key}")
-                    elif isinstance(value, dict):
-                        new_value = st.text_area(f"", value=json.dumps(value, indent=2), key=f"{selected_section}_{key}")
-                        try:
-                            new_value = json.loads(new_value)
-                        except:
-                            st.error("JSON inválido")
-                            new_value = value
-                    else:
-                        new_value = st.text_input(f"", value=str(value), key=f"{selected_section}_{key}")
-                    
-                    if new_value != value:
-                        self.config[selected_section][key] = new_value
-                        updated = True
-            
-            # Botões de controle
-            col1, col2, col3 = st.columns(3)
-            
-            with col1:
-                if st.button("💾 Salvar Alterações"):
-                    self.save_config()
-                    st.success("Configuração salva!")
-                    st.rerun()
-            
-            with col2:
-                if st.button("📤 Exportar JSON"):
-                    st.text_area("Configuração JSON:", self.export_config(), height=300)
-            
-            with col3:
-                if st.button("🔄 Resetar Padrão"):
-                    self.reset_to_default()
-                    st.success("Configuração resetada!")
-                    st.rerun()
+
 
 # Inicializar gerenciador de temas
 theme_manager = ThemeManager()
