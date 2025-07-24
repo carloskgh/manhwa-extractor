@@ -59,4 +59,4 @@ MIT
 
 ---
 
-Desenvolvido por [Seu Nome ou GitHub](https://github.com/seu-usuario)
+Desenvolvido por GitHub](https://github.com/carloskgh)
