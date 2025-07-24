@@ -302,11 +302,18 @@ class AsyncOperationsManager:
             logger.info("Sessão HTTP fechada")
     
     async def download_image_async(self, url: str) -> Optional[bytes]:
-        """Download assíncrono de imagem com rate limiting"""
+        """Download assíncrono de imagem com rate limiting e cache"""
         start_time = time.time()
         metrics_collector.active_downloads += 1
         
         try:
+            # Verificar cache primeiro
+            cached_image = intelligent_cache.get(url, 'image')
+            if cached_image:
+                logger.debug(f"Imagem obtida do cache: {url}")
+                metrics_collector.record_request(time.time() - start_time, True, "cache_hit")
+                return cached_image
+            
             # Verificar rate limiting
             can_request, wait_time = rate_limiter.can_request(url)
             if not can_request:
@@ -358,6 +365,10 @@ class AsyncOperationsManager:
                         return None
                     
                     logger.debug(f"Download assíncrono concluído: {url} ({len(content)} bytes)")
+                    
+                    # Armazenar no cache
+                    intelligent_cache.set(url, content, 'image')
+                    
                     metrics_collector.record_request(time.time() - start_time, True, "download_success")
                     return content
                     
@@ -402,11 +413,22 @@ class AsyncOperationsManager:
         return valid_results
     
     async def process_image_async(self, img_data: bytes, nome_fonte: str) -> Tuple[List, Optional[str]]:
-        """Processamento assíncrono de imagem em processo separado"""
+        """Processamento assíncrono de imagem em processo separado com cache"""
         start_time = time.time()
         metrics_collector.active_processing += 1
         
         try:
+            # Verificar cache primeiro
+            cache_key = f"{nome_fonte}_{hashlib.md5(img_data).hexdigest()}"
+            cached_result = intelligent_cache.get(cache_key, 'processed_image')
+            if cached_result:
+                logger.debug(f"Resultado de processamento obtido do cache: {nome_fonte}")
+                processing_time = time.time() - start_time
+                paineis, erro = cached_result
+                panels_count = len(paineis) if not erro else 0
+                metrics_collector.record_processing(processing_time, panels_count, nome_fonte)
+                return cached_result
+            
             logger.info(f"Processando imagem assíncrona: {nome_fonte} ({len(img_data)} bytes)")
             
             # Executar processamento pesado em processo separado
@@ -417,6 +439,9 @@ class AsyncOperationsManager:
                 img_data,
                 nome_fonte
             )
+            
+            # Armazenar resultado no cache
+            intelligent_cache.set(cache_key, result, 'processed_image')
             
             # Registrar métricas de processamento
             paineis, erro = result
@@ -677,6 +702,372 @@ class MetricsCollector:
 
 # Inicializar coletor de métricas
 metrics_collector = MetricsCollector()
+
+# Sistema de Cache Inteligente
+from pathlib import Path
+import pickle
+import hashlib
+from typing import Any
+
+class IntelligentCache:
+    """Sistema de cache inteligente com persistência e invalidação automática"""
+    
+    def __init__(self, cache_dir: str = "cache", max_memory_mb: int = 200):
+        self.cache_dir = Path(cache_dir)
+        self.cache_dir.mkdir(exist_ok=True)
+        self.max_memory_bytes = max_memory_mb * 1024 * 1024
+        self.memory_cache = {}  # Cache em memória para itens pequenos
+        self.cache_index = {}   # Índice com metadados dos itens
+        self.hit_count = 0
+        self.miss_count = 0
+        
+        # Configurações de TTL por tipo
+        self.ttl_config = {
+            'image': 3600 * 24,      # Imagens: 24 horas
+            'webpage': 3600 * 6,     # Páginas web: 6 horas  
+            'chapter_list': 3600 * 12, # Lista de capítulos: 12 horas
+            'processed_image': 3600 * 24 * 7, # Imagens processadas: 7 dias
+            'default': 3600 * 2      # Padrão: 2 horas
+        }
+        
+        self._load_index()
+        self._cleanup_expired()
+        logger.info(f"💾 Cache inteligente inicializado - Diretório: {cache_dir}")
+    
+    def _get_cache_key(self, data: Any, cache_type: str = "default") -> str:
+        """Gera chave única para o cache"""
+        if isinstance(data, str):
+            data_str = data
+        elif isinstance(data, bytes):
+            data_str = hashlib.md5(data).hexdigest()
+        else:
+            data_str = str(data)
+        
+        key_data = f"{cache_type}_{data_str}"
+        return hashlib.sha256(key_data.encode()).hexdigest()[:16]
+    
+    def _get_file_path(self, key: str) -> Path:
+        """Obtém caminho do arquivo de cache"""
+        return self.cache_dir / f"{key}.cache"
+    
+    def _load_index(self):
+        """Carrega índice do cache"""
+        index_file = self.cache_dir / "cache_index.json"
+        try:
+            if index_file.exists():
+                with open(index_file, 'r') as f:
+                    self.cache_index = json.load(f)
+                logger.debug(f"Índice do cache carregado: {len(self.cache_index)} itens")
+        except Exception as e:
+            logger.warning(f"Erro ao carregar índice do cache: {e}")
+            self.cache_index = {}
+    
+    def _save_index(self):
+        """Salva índice do cache"""
+        index_file = self.cache_dir / "cache_index.json"
+        try:
+            with open(index_file, 'w') as f:
+                json.dump(self.cache_index, f, indent=2)
+        except Exception as e:
+            logger.warning(f"Erro ao salvar índice do cache: {e}")
+    
+    def _cleanup_expired(self):
+        """Remove itens expirados do cache"""
+        current_time = time.time()
+        expired_keys = []
+        
+        for key, metadata in self.cache_index.items():
+            if current_time > metadata.get('expires_at', 0):
+                expired_keys.append(key)
+        
+        for key in expired_keys:
+            self._remove_item(key)
+        
+        if expired_keys:
+            logger.info(f"Cache cleanup: {len(expired_keys)} itens expirados removidos")
+    
+    def _remove_item(self, key: str):
+        """Remove item do cache"""
+        # Remover da memória
+        self.memory_cache.pop(key, None)
+        
+        # Remover arquivo
+        file_path = self._get_file_path(key)
+        if file_path.exists():
+            try:
+                file_path.unlink()
+            except Exception as e:
+                logger.warning(f"Erro ao remover arquivo de cache {key}: {e}")
+        
+        # Remover do índice
+        self.cache_index.pop(key, None)
+    
+    def _get_memory_usage(self) -> int:
+        """Calcula uso atual de memória do cache"""
+        total_size = 0
+        for key, data in self.memory_cache.items():
+            try:
+                total_size += len(pickle.dumps(data))
+            except:
+                pass
+        return total_size
+    
+    def _enforce_memory_limit(self):
+        """Aplica limite de memória removendo itens menos usados"""
+        if self._get_memory_usage() <= self.max_memory_bytes:
+            return
+        
+        # Ordenar por último acesso e remover os mais antigos
+        sorted_items = sorted(
+            self.cache_index.items(),
+            key=lambda x: x[1].get('last_access', 0)
+        )
+        
+        for key, _ in sorted_items:
+            if key in self.memory_cache:
+                del self.memory_cache[key]
+                logger.debug(f"Item removido da memória por limite: {key}")
+                
+                if self._get_memory_usage() <= self.max_memory_bytes * 0.8:
+                    break
+    
+    def get(self, data: Any, cache_type: str = "default") -> Any:
+        """Recupera item do cache"""
+        key = self._get_cache_key(data, cache_type)
+        current_time = time.time()
+        
+        # Verificar se existe e não expirou
+        if key not in self.cache_index:
+            self.miss_count += 1
+            metrics_collector.record_cache_event(False)
+            return None
+        
+        metadata = self.cache_index[key]
+        if current_time > metadata.get('expires_at', 0):
+            self._remove_item(key)
+            self.miss_count += 1
+            metrics_collector.record_cache_event(False)
+            return None
+        
+        # Tentar recuperar da memória primeiro
+        if key in self.memory_cache:
+            self.hit_count += 1
+            metadata['last_access'] = current_time
+            metadata['hit_count'] = metadata.get('hit_count', 0) + 1
+            metrics_collector.record_cache_event(True)
+            logger.debug(f"Cache hit (memória): {cache_type}")
+            return self.memory_cache[key]
+        
+        # Recuperar do disco
+        file_path = self._get_file_path(key)
+        if not file_path.exists():
+            self._remove_item(key)
+            self.miss_count += 1
+            metrics_collector.record_cache_event(False)
+            return None
+        
+        try:
+            with open(file_path, 'rb') as f:
+                data = pickle.load(f)
+            
+            # Colocar na memória se couber
+            if self._get_memory_usage() < self.max_memory_bytes:
+                self.memory_cache[key] = data
+                self._enforce_memory_limit()
+            
+            self.hit_count += 1
+            metadata['last_access'] = current_time
+            metadata['hit_count'] = metadata.get('hit_count', 0) + 1
+            metrics_collector.record_cache_event(True)
+            logger.debug(f"Cache hit (disco): {cache_type}")
+            return data
+            
+        except Exception as e:
+            logger.warning(f"Erro ao ler cache {key}: {e}")
+            self._remove_item(key)
+            self.miss_count += 1
+            metrics_collector.record_cache_event(False)
+            return None
+    
+    def set(self, data: Any, value: Any, cache_type: str = "default") -> bool:
+        """Armazena item no cache"""
+        key = self._get_cache_key(data, cache_type)
+        current_time = time.time()
+        ttl = self.ttl_config.get(cache_type, self.ttl_config['default'])
+        
+        try:
+            # Metadados do item
+            metadata = {
+                'created_at': current_time,
+                'last_access': current_time,
+                'expires_at': current_time + ttl,
+                'cache_type': cache_type,
+                'hit_count': 0,
+                'size_bytes': len(pickle.dumps(value))
+            }
+            
+            # Salvar no disco
+            file_path = self._get_file_path(key)
+            with open(file_path, 'wb') as f:
+                pickle.dump(value, f)
+            
+            # Colocar na memória se couber
+            if metadata['size_bytes'] < self.max_memory_bytes // 10:  # Máximo 10% da memória por item
+                self.memory_cache[key] = value
+                self._enforce_memory_limit()
+            
+            # Atualizar índice
+            self.cache_index[key] = metadata
+            self._save_index()
+            
+            logger.debug(f"Item adicionado ao cache: {cache_type} (TTL: {ttl}s)")
+            return True
+            
+        except Exception as e:
+            logger.warning(f"Erro ao salvar no cache: {e}")
+            return False
+    
+    def invalidate_type(self, cache_type: str):
+        """Invalida todos os itens de um tipo específico"""
+        keys_to_remove = [
+            key for key, metadata in self.cache_index.items()
+            if metadata.get('cache_type') == cache_type
+        ]
+        
+        for key in keys_to_remove:
+            self._remove_item(key)
+        
+        if keys_to_remove:
+            self._save_index()
+            logger.info(f"Cache invalidado: {len(keys_to_remove)} itens do tipo '{cache_type}'")
+    
+    def clear_all(self):
+        """Limpa todo o cache"""
+        # Limpar memória
+        self.memory_cache.clear()
+        
+        # Remover arquivos
+        for cache_file in self.cache_dir.glob("*.cache"):
+            try:
+                cache_file.unlink()
+            except Exception as e:
+                logger.warning(f"Erro ao remover {cache_file}: {e}")
+        
+        # Limpar índice
+        self.cache_index.clear()
+        self._save_index()
+        
+        logger.info("Cache completamente limpo")
+    
+    def get_stats(self) -> Dict:
+        """Retorna estatísticas do cache"""
+        total_requests = self.hit_count + self.miss_count
+        hit_rate = (self.hit_count / total_requests) if total_requests > 0 else 0
+        
+        # Calcular tamanhos
+        memory_usage = self._get_memory_usage()
+        disk_usage = sum(
+            metadata.get('size_bytes', 0) 
+            for metadata in self.cache_index.values()
+        )
+        
+        # Estatísticas por tipo
+        type_stats = {}
+        for metadata in self.cache_index.values():
+            cache_type = metadata.get('cache_type', 'unknown')
+            if cache_type not in type_stats:
+                type_stats[cache_type] = {'count': 0, 'size': 0}
+            type_stats[cache_type]['count'] += 1
+            type_stats[cache_type]['size'] += metadata.get('size_bytes', 0)
+        
+        return {
+            'hit_rate': hit_rate,
+            'hit_count': self.hit_count,
+            'miss_count': self.miss_count,
+            'total_items': len(self.cache_index),
+            'memory_items': len(self.memory_cache),
+            'memory_usage_mb': memory_usage / 1024 / 1024,
+            'disk_usage_mb': disk_usage / 1024 / 1024,
+            'max_memory_mb': self.max_memory_bytes / 1024 / 1024,
+            'type_stats': type_stats
+        }
+    
+    def display_dashboard(self):
+        """Exibe dashboard do cache"""
+        stats = self.get_stats()
+        
+        st.markdown("### 💾 Dashboard do Cache")
+        
+        # Métricas principais
+        col1, col2, col3, col4 = st.columns(4)
+        
+        with col1:
+            st.metric(
+                "Hit Rate",
+                f"{stats['hit_rate']:.1%}",
+                delta="Excelente" if stats['hit_rate'] > 0.8 else "Baixo"
+            )
+        
+        with col2:
+            st.metric(
+                "Total de Itens",
+                stats['total_items'],
+                delta=f"{stats['memory_items']} em memória"
+            )
+        
+        with col3:
+            st.metric(
+                "Uso de Memória",
+                f"{stats['memory_usage_mb']:.1f}MB",
+                delta=f"/{stats['max_memory_mb']:.0f}MB"
+            )
+        
+        with col4:
+            st.metric(
+                "Uso de Disco",
+                f"{stats['disk_usage_mb']:.1f}MB",
+                delta=f"{len(self.cache_dir.glob('*.cache'))} arquivos"
+            )
+        
+        # Estatísticas por tipo
+        if stats['type_stats']:
+            st.markdown("#### 📊 Cache por Tipo")
+            for cache_type, type_data in stats['type_stats'].items():
+                col1, col2 = st.columns(2)
+                with col1:
+                    st.metric(
+                        f"📁 {cache_type.title()}",
+                        type_data['count'],
+                        help=f"Número de itens do tipo {cache_type}"
+                    )
+                with col2:
+                    st.metric(
+                        "Tamanho",
+                        f"{type_data['size'] / 1024 / 1024:.1f}MB",
+                        help=f"Espaço usado pelo tipo {cache_type}"
+                    )
+        
+        # Botões de controle
+        col1, col2, col3 = st.columns(3)
+        
+        with col1:
+            if st.button("🧹 Limpar Cache Expirado"):
+                self._cleanup_expired()
+                st.success("Cache expirado removido!")
+                st.rerun()
+        
+        with col2:
+            if st.button("🗑️ Limpar Tudo", type="secondary"):
+                self.clear_all()
+                st.success("Cache completamente limpo!")
+                st.rerun()
+        
+        with col3:
+            if st.button("📊 Atualizar Stats"):
+                st.rerun()
+
+# Inicializar cache inteligente
+intelligent_cache = IntelligentCache()
 
 # Wrapper para executar operações assíncronas no Streamlit
 def run_async(coro):
@@ -1132,10 +1523,15 @@ def baixar_imagem_url_otimizada(url: str) -> Optional[bytes]:
 
 # NOVAS FUNÇÕES PARA WEB SCRAPING
 
-@st.cache_data(ttl=300, show_spinner=False)  # Cache por 5 minutos
 def fazer_requisicao_web(url: str) -> Optional[BeautifulSoup]:
-    """Faz requisição web e retorna BeautifulSoup"""
+    """Faz requisição web e retorna BeautifulSoup com cache inteligente"""
     try:
+        # Verificar cache primeiro
+        cached_content = intelligent_cache.get(url, 'webpage')
+        if cached_content:
+            logger.debug(f"Requisição web obtida do cache: {url}")
+            return BeautifulSoup(cached_content, 'html.parser')
+        
         logger.info(f"Fazendo requisição para: {url}")
         
         # Aplicar rate limiting inteligente
@@ -1148,6 +1544,10 @@ def fazer_requisicao_web(url: str) -> Optional[BeautifulSoup]:
         response = requests.get(url, headers=SCRAPING_HEADERS, timeout=REQUEST_TIMEOUT)
         response.raise_for_status()
         logger.info(f"Requisição bem-sucedida para {url} (status: {response.status_code})")
+        
+        # Armazenar no cache
+        intelligent_cache.set(url, response.content, 'webpage')
+        
         return BeautifulSoup(response.content, 'html.parser')
     except Exception as e:
         logger.error(f"Erro ao acessar URL {url}: {e}")
@@ -1155,7 +1555,13 @@ def fazer_requisicao_web(url: str) -> Optional[BeautifulSoup]:
         return None
 
 def extrair_info_manhwa_manhwatop(soup: BeautifulSoup, base_url: str) -> Dict:
-    """Extrai informações do manhwa do ManhwaTop"""
+    """Extrai informações do manhwa do ManhwaTop com cache"""
+    # Verificar cache primeiro
+    cached_info = intelligent_cache.get(base_url, 'chapter_list')
+    if cached_info:
+        logger.debug(f"Informações do manhwa obtidas do cache: {base_url}")
+        return cached_info
+    
     logger.info(f"Extraindo informações do manhwa de {base_url}")
     info = {
         "titulo": "Manhwa",
@@ -1222,6 +1628,9 @@ def extrair_info_manhwa_manhwatop(soup: BeautifulSoup, base_url: str) -> Dict:
         # Ordenar capítulos por número
         info["capitulos"].sort(key=lambda x: float(x["numero"]) if x["numero"].replace('.', '').isdigit() else 999)
         logger.info(f"Extraídos {len(info['capitulos'])} capítulos do manhwa '{info['titulo']}'")
+        
+        # Armazenar no cache
+        intelligent_cache.set(base_url, info, 'chapter_list')
         
     except Exception as e:
         logger.error(f"Erro ao extrair informações do manhwa: {e}", exc_info=True)
@@ -1421,6 +1830,30 @@ if hasattr(async_manager, 'session') and async_manager.session:
         )
 else:
     st.sidebar.info("💤 Sessão assíncrona inativa")
+
+# Estatísticas do cache
+st.sidebar.markdown("### 💾 Cache Inteligente")
+cache_stats = intelligent_cache.get_stats()
+if cache_stats['total_items'] > 0:
+    st.sidebar.metric(
+        "Hit Rate",
+        f"{cache_stats['hit_rate']:.1%}",
+        delta="Ótimo" if cache_stats['hit_rate'] > 0.8 else "Baixo"
+    )
+    
+    col1, col2 = st.sidebar.columns(2)
+    with col1:
+        st.metric("Itens", cache_stats['total_items'])
+    with col2:
+        st.metric("Memória", f"{cache_stats['memory_usage_mb']:.1f}MB")
+    
+    # Botão de limpeza rápida
+    if st.sidebar.button("🧹 Limpar Cache"):
+        intelligent_cache._cleanup_expired()
+        st.sidebar.success("Cache limpo!")
+        st.rerun()
+else:
+    st.sidebar.info("📭 Cache vazio")
 
 # Debug info
 if st.sidebar.checkbox("🔍 Debug"):
@@ -1792,6 +2225,9 @@ with tab5:
     
     # Dashboard principal
     metrics_collector.display_dashboard()
+    
+    # Dashboard do cache
+    intelligent_cache.display_dashboard()
     
     # Seção de configurações avançadas
     with st.expander("⚙️ Configurações Avançadas"):
