@@ -704,7 +704,6 @@ class ConfigManager:
                 if st.button("💾 Salvar Alterações"):
                     self.save_config()
                     st.success("Configuração salva!")
-                    st.rerun()
             
             with col2:
                 if st.button("📤 Exportar JSON"):
@@ -714,10 +713,9 @@ class ConfigManager:
                 if st.button("🔄 Resetar Padrão"):
                     self.reset_to_default()
                     st.success("Configuração resetada!")
-                    st.rerun()
-
-# Inicializar gerenciador de configuração primeiro
-config_manager = ConfigManager()
+    
+    # Inicializar gerenciador de configuração primeiro
+    config_manager = ConfigManager()
 
 # Inicializar gerenciador assíncrono
 async_manager = AsyncOperationsManager()
@@ -1758,8 +1756,8 @@ def init_session_state():
     defaults = {
         "contador_paineis": 0,
         "painel_coletor": [],
-        "imagens_processadas": set(),
-        "paineis_processados": set(),
+        "imagens_processadas": [],  # Corrigido de set() para list()
+        "paineis_processados": [],  # Corrigido de set() para list()
         "_cache_hash": {},
         "capitulos_cache": {},  # Cache para capítulos
         "manhwa_info": {}  # Informações do manhwa
@@ -3098,3 +3096,28 @@ document.querySelectorAll('a[href^="#"]').forEach(anchor => {
 </script>
 """, unsafe_allow_html=True)
 st.markdown('<div id="final_paineis" style="height:1px;"></div>', unsafe_allow_html=True)
+
+# --- Download automático do modelo best.pt, se necessário ---
+def baixar_best_pt_if_needed():
+    import os
+    import requests
+    modelo_dir = "modelos"
+    modelo_path = os.path.join(modelo_dir, "best.pt")
+    url = "https://www.dropbox.com/scl/fi/a743aqjqzau3fxy4fss4a/best.pt?rlkey=a24lozm0cw8znku0h743ylx2z&st=c4t06y2d&dl=1"
+    if not os.path.exists(modelo_path):
+        try:
+            os.makedirs(modelo_dir, exist_ok=True)
+            print(f"Baixando modelo YOLO best.pt de {url} ...")
+            resp = requests.get(url, stream=True, timeout=60)
+            resp.raise_for_status()
+            with open(modelo_path, "wb") as f:
+                for chunk in resp.iter_content(chunk_size=8192):
+                    if chunk:
+                        f.write(chunk)
+            print("Modelo best.pt baixado com sucesso!")
+        except Exception as e:
+            print(f"Erro ao baixar best.pt: {e}")
+    else:
+        print("Modelo best.pt já existe.")
+
+baixar_best_pt_if_needed()
