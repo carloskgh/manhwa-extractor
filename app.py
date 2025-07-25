@@ -704,7 +704,6 @@ class ConfigManager:
                 if st.button("💾 Salvar Alterações"):
                     self.save_config()
                     st.success("Configuração salva!")
-                    st.rerun()
             
             with col2:
                 if st.button("📤 Exportar JSON"):
@@ -714,10 +713,9 @@ class ConfigManager:
                 if st.button("🔄 Resetar Padrão"):
                     self.reset_to_default()
                     st.success("Configuração resetada!")
-                    st.rerun()
-
-# Inicializar gerenciador de configuração primeiro
-config_manager = ConfigManager()
+    
+    # Inicializar gerenciador de configuração primeiro
+    config_manager = ConfigManager()
 
 # Inicializar gerenciador assíncrono
 async_manager = AsyncOperationsManager()
@@ -1758,8 +1756,8 @@ def init_session_state():
     defaults = {
         "contador_paineis": 0,
         "painel_coletor": [],
-        "imagens_processadas": set(),
-        "paineis_processados": set(),
+        "imagens_processadas": [],  # Corrigido de set() para list()
+        "paineis_processados": [],  # Corrigido de set() para list()
         "_cache_hash": {},
         "capitulos_cache": {},  # Cache para capítulos
         "manhwa_info": {}  # Informações do manhwa
