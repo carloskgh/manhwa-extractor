@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+*.pt
+modelos/
+.DS_Store
+*.zip
