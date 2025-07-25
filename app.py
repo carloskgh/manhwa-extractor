@@ -509,7 +509,7 @@ class ConfigManager:
                 "supported_formats": ["jpg", "jpeg", "png", "webp"]
             },
             "yolo": {
-                "model_name": "yolov8n.pt",
+                "model_name": "best.pt",
                 "confidence_threshold": 0.25,
                 "device": "cpu",
                 "max_det": 300
