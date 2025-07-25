@@ -83,7 +83,8 @@ class RateLimiter:
         """Extrai domínio da URL"""
         try:
             return urlparse(url).netloc.lower()
-        except:
+        except (ValueError, AttributeError, TypeError) as e:
+            logger.warning(f"Erro ao extrair domínio da URL '{url}': {e}")
             return 'unknown'
     
     def can_request(self, url: str) -> tuple[bool, float]:
@@ -1005,8 +1006,8 @@ class IntelligentCache:
         """Salva índice do cache"""
         index_file = self.cache_dir / "cache_index.json"
         try:
-            with open(index_file, 'w') as f:
-                json.dump(self.cache_index, f, indent=2)
+            with open(index_file, 'w', encoding='utf-8') as f:
+                json.dump(self.cache_index, f, indent=2, ensure_ascii=False)
         except Exception as e:
             logger.warning(f"Erro ao salvar índice do cache: {e}")
     
@@ -3101,23 +3102,32 @@ st.markdown('<div id="final_paineis" style="height:1px;"></div>', unsafe_allow_h
 def baixar_best_pt_if_needed():
     import os
     import requests
-    modelo_dir = "modelos"
-    modelo_path = os.path.join(modelo_dir, "best.pt")
+    from pathlib import Path
+    
+    # Validar e normalizar caminho para evitar path traversal
+    modelo_dir = Path("modelos").resolve()
+    modelo_path = modelo_dir / "best.pt"
+    
+    # Verificar se o caminho está dentro do diretório de trabalho
+    if not str(modelo_path).startswith(str(Path.cwd())):
+        logger.error("Tentativa de path traversal detectada")
+        return
+    
     url = "https://www.dropbox.com/scl/fi/a743aqjqzau3fxy4fss4a/best.pt?rlkey=a24lozm0cw8znku0h743ylx2z&st=c4t06y2d&dl=1"
-    if not os.path.exists(modelo_path):
+    if not modelo_path.exists():
         try:
-            os.makedirs(modelo_dir, exist_ok=True)
-            print(f"Baixando modelo YOLO best.pt de {url} ...")
+            modelo_dir.mkdir(exist_ok=True)
+            logger.info(f"Baixando modelo YOLO best.pt de {url} ...")
             resp = requests.get(url, stream=True, timeout=60)
             resp.raise_for_status()
             with open(modelo_path, "wb") as f:
                 for chunk in resp.iter_content(chunk_size=8192):
                     if chunk:
                         f.write(chunk)
-            print("Modelo best.pt baixado com sucesso!")
+            logger.info("Modelo best.pt baixado com sucesso!")
         except Exception as e:
-            print(f"Erro ao baixar best.pt: {e}")
+            logger.error(f"Erro ao baixar best.pt: {e}")
     else:
-        print("Modelo best.pt já existe.")
+        logger.info("Modelo best.pt já existe.")
 
 baixar_best_pt_if_needed()
