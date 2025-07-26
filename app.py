@@ -26,6 +26,28 @@ import aiofiles
 from concurrent.futures import ProcessPoolExecutor
 from functools import partial
 
+# --- Download automático do modelo best.pt, se necessário ---
+def baixar_best_pt_if_needed():
+    modelo_dir = "modelos"
+    modelo_path = os.path.join(modelo_dir, "best.pt")
+    url = "https://www.dropbox.com/scl/fi/a743aqjqzau3fxy4fss4a/best.pt?rlkey=a24lozm0cw8znku0h743ylx2z&st=c4t06y2d&dl=1"
+    if not os.path.exists(modelo_path):
+        try:
+            os.makedirs(modelo_dir, exist_ok=True)
+            print(f"Baixando modelo YOLO best.pt de {url} ...")
+            resp = requests.get(url, stream=True, timeout=60)
+            resp.raise_for_status()
+            with open(modelo_path, "wb") as f:
+                for chunk in resp.iter_content(chunk_size=8192):
+                    if chunk:
+                        f.write(chunk)
+            print("Modelo best.pt baixado com sucesso!")
+        except Exception as e:
+            print(f"Erro ao baixar best.pt: {e}")
+    else:
+        print("Modelo best.pt já existe.")
+
+baixar_best_pt_if_needed()
 # Configuração do sistema de logging
 def setup_logging():
     """Configura o sistema de logging profissional"""
@@ -3097,27 +3119,4 @@ document.querySelectorAll('a[href^="#"]').forEach(anchor => {
 """, unsafe_allow_html=True)
 st.markdown('<div id="final_paineis" style="height:1px;"></div>', unsafe_allow_html=True)
 
-# --- Download automático do modelo best.pt, se necessário ---
-def baixar_best_pt_if_needed():
-    import os
-    import requests
-    modelo_dir = "modelos"
-    modelo_path = os.path.join(modelo_dir, "best.pt")
-    url = "https://www.dropbox.com/scl/fi/a743aqjqzau3fxy4fss4a/best.pt?rlkey=a24lozm0cw8znku0h743ylx2z&st=c4t06y2d&dl=1"
-    if not os.path.exists(modelo_path):
-        try:
-            os.makedirs(modelo_dir, exist_ok=True)
-            print(f"Baixando modelo YOLO best.pt de {url} ...")
-            resp = requests.get(url, stream=True, timeout=60)
-            resp.raise_for_status()
-            with open(modelo_path, "wb") as f:
-                for chunk in resp.iter_content(chunk_size=8192):
-                    if chunk:
-                        f.write(chunk)
-            print("Modelo best.pt baixado com sucesso!")
-        except Exception as e:
-            print(f"Erro ao baixar best.pt: {e}")
-    else:
-        print("Modelo best.pt já existe.")
 
-baixar_best_pt_if_needed()
